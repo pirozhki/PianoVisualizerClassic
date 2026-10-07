@@ -12,34 +12,43 @@ Piano Visualizer Classic displays MIDI notes as falling notes over an 88-key pia
 
 ## Features
 
-- Falling MIDI note visualization
-- Full 88-key piano keyboard display
-- Velocity-based note and keyboard illumination
-- Track-based note colors
-- C4 position label
-- Optional octave guide lines at B-to-C boundaries
-- Background image support with adjustable opacity
-- Configurable note fall speed
-- Visual effects:
-  - Smoke Glow
-  - Light Cross
-  - Spark
-  - Ripple
-  - Diamond Ripple
-  - Note Glow
-- Realtime MIDI playback with an internal XAudio2 synthesizer
-- Playback audio can be enabled or disabled independently of the visualizer
-- MP4 video rendering through FFmpeg
-- Optional audio track in rendered videos
-- Render progress and cancellation support
-- Resolution-independent video rendering
+* Falling MIDI note visualization
+* Full 88-key piano keyboard display
+* Velocity-based note and keyboard illumination
+* Track-based note colors
+* C4 position label
+* Optional octave guide lines at B-to-C boundaries
+* Background image support with adjustable opacity
+* Configurable note fall speed
+* Visual effects:
+
+  * Smoke Glow
+  * Light Cross
+  * Spark
+  * Ripple
+  * Diamond Ripple
+  * Note Glow
+* Realtime MIDI playback with an internal XAudio2 synthesizer
+* Playback audio can be enabled or disabled independently of the visualizer
+* MP4 video rendering through FFmpeg
+* Optional audio track in rendered videos
+* Render progress and cancellation support
+* Resolution-independent video rendering
+
+## Download
+
+The latest version can be downloaded from [Releases](../../releases).
+
+### Windows 64-bit
+
+Download `PianoVisualizerClassic-v1.0.0.zip`, extract it, and run `PianoVisualizerClassic.exe`.
 
 ## Requirements
 
-- Windows 10 or later
-- Visual Studio with C++ desktop development tools
-- Windows SDK
-- FFmpeg (`ffmpeg.exe`) for MP4 video rendering
+* Windows 10 or later
+* Visual Studio with C++ desktop development tools
+* Windows SDK
+* FFmpeg (`ffmpeg.exe`) for MP4 video rendering
 
 The included project uses the Visual Studio C++ toolset (`v145`). CMake is not required.
 
@@ -99,10 +108,10 @@ The video renderer uses a separate Direct2D/WIC rendering context from the realt
 
 The render dialog provides options including:
 
-- Video width
-- Video height
-- Output file
-- Include audio
+* Video width
+* Video height
+* Output file
+* Include audio
 
 The current visualizer settings are used when rendering the video, including effects, track colors, background image, octave guide lines, and fall speed.
 
@@ -110,14 +119,14 @@ The current visualizer settings are used when rendering the video, including eff
 
 The control dialog provides settings for playback and visualization, including:
 
-- Fall Speed
-- Background image
-- Background opacity
-- Visual effects
-- Track colors
-- Playback audio and volume
-- Octave guide lines
-- Video rendering
+* Fall Speed
+* Background image
+* Background opacity
+* Visual effects
+* Track colors
+* Playback audio and volume
+* Octave guide lines
+* Video rendering
 
 Several settings can be changed while playback is running.
 
