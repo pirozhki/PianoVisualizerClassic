@@ -8,11 +8,7 @@ Piano Visualizer Classic displays MIDI notes as falling notes over an 88-key pia
 
 ### Main Playback Window
 
-![Piano Visualizer Classic - Main](screenshots/visualizer_main.png)
-
-### Control Dialog
-
-![Piano Visualizer Classic - Control](screenshots/visualizer_control.png)
+![Piano Visualizer Classic - Main](screenshots/visualizer.png)
 
 ## Features
 
