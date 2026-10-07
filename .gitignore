@@ -1,0 +1,30 @@
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+*.aps
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Build output / intermediate files
+x64/
+bin/
+
+# Common build artifacts
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.ilk
+*.tlog
+*.lastbuildstate
+*.log
+ipch/
+
+# Local development files
+memo.txt
+
+# Optional local FFmpeg executable (not part of the source repository)
+ffmpeg.exe
