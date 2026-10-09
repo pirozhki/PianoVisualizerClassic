@@ -24,7 +24,7 @@ class VideoRenderer {
 public:
     using ProgressCallback = std::function<void(int percent, const std::wstring& status)>;
 
-    static constexpr double kTailSeconds = 0.50;
+    static constexpr double kTailSeconds = 2.00;
 
     bool RenderMp4(const Visualizer& visualizer,
                    const MidiSong& song,

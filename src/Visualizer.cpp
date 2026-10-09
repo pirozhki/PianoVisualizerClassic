@@ -51,6 +51,19 @@ float Random01(std::uint32_t& state) {
     return static_cast<float>((NextRandom(state) >> 8) & 0x00FFFFFFu) / 16777216.0f;
 }
 
+// A stable, independently keyed pseudo-random sample for each ambient particle
+// property. The deterministic mapping keeps video renders repeatable while
+// avoiding the visible correlations of sequential samples from similar seeds.
+float AmbientRandom01(std::uint32_t particleIndex, std::uint32_t channel) {
+    std::uint32_t h = particleIndex * 0x9E3779B9u + channel * 0x85EBCA6Bu + 0xA511E9B3u;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
+    return static_cast<float>((h >> 8) & 0x00FFFFFFu) / 16777216.0f;
+}
+
 float VelocityOpacity(int velocity) {
     return 0.34f + 0.66f * Velocity01(velocity);
 }
@@ -92,6 +105,9 @@ void Visualizer::Shutdown() {
     hwnd_ = nullptr;
     particleCount_ = 0;
     rippleCount_ = 0;
+    impactShardCount_ = 0;
+    hitWaveCount_ = 0;
+    triangleGeometry_.Reset();
     effectInitialized_ = false;
 }
 
@@ -124,7 +140,9 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     fallSpeed_ = source.fallSpeed_;
     maxNoteDuration_ = source.maxNoteDuration_;
     effectMask_ = source.effectMask_;
+    ambientParticleCount_ = source.ambientParticleCount_;
     showNoteGuides_ = source.showNoteGuides_;
+    waveLineColor_ = source.waveLineColor_;
     backgroundPath_ = source.backgroundPath_;
     backgroundOpacity_ = source.backgroundOpacity_;
 
@@ -224,8 +242,21 @@ bool Visualizer::CreateDrawingResources() {
         FAILED(target_->CreateSolidColorBrush(
             D2D1::ColorF(0.02f, 0.03f, 0.05f, 1.0f), black_.ReleaseAndGetAddressOf())) ||
         FAILED(target_->CreateSolidColorBrush(
-            D2D1::ColorF(0.01f, 0.015f, 0.025f, 1.0f), darkBg_.ReleaseAndGetAddressOf()))) {
+            D2D1::ColorF(0.01f, 0.015f, 0.025f, 1.0f), darkBg_.ReleaseAndGetAddressOf())) ||
+        FAILED(target_->CreateSolidColorBrush(
+            waveLineColor_, waveLineBrush_.ReleaseAndGetAddressOf()))) {
         return false;
+    }
+
+    if (!triangleGeometry_) {
+        if (FAILED(factory_->CreatePathGeometry(triangleGeometry_.ReleaseAndGetAddressOf()))) return false;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(triangleGeometry_->Open(sink.ReleaseAndGetAddressOf()))) return false;
+        sink->BeginFigure(D2D1::Point2F(0.0f, -0.60f), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(0.58f, 0.48f));
+        sink->AddLine(D2D1::Point2F(-0.58f, 0.48f));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        if (FAILED(sink->Close())) return false;
     }
 
     if (!dwriteFactory_) {
@@ -238,11 +269,13 @@ bool Visualizer::CreateDrawingResources() {
     if (!CreateC4LabelFormat()) return false;
 
     {
+        // Keep the original vertical gradient, but lift every stop so the
+        // white keys read brighter overall. Black keys and key outlines are unchanged.
         D2D1_GRADIENT_STOP stops[] = {
-            {0.00f, D2D1::ColorF(0.98f, 0.98f, 0.98f, 1.0f)},
-            {0.12f, D2D1::ColorF(0.90f, 0.91f, 0.93f, 1.0f)},
-            {0.72f, D2D1::ColorF(0.80f, 0.83f, 0.87f, 1.0f)},
-            {1.00f, D2D1::ColorF(0.61f, 0.64f, 0.68f, 1.0f)},
+            {0.00f, D2D1::ColorF(1.00f, 1.00f, 1.00f, 1.0f)},
+            {0.12f, D2D1::ColorF(0.96f, 0.97f, 0.99f, 1.0f)},
+            {0.72f, D2D1::ColorF(0.89f, 0.91f, 0.94f, 1.0f)},
+            {1.00f, D2D1::ColorF(0.76f, 0.79f, 0.83f, 1.0f)},
         };
         ComPtr<ID2D1GradientStopCollection> collection;
         if (FAILED(target_->CreateGradientStopCollection(
@@ -305,14 +338,15 @@ bool Visualizer::CreateEffectBrushes() {
         const D2D1::ColorF mainColor = NoteColorForTrack(track);
         const D2D1::ColorF glowColor = GlowColorForTrack(track);
 
-        D2D1_GRADIENT_STOP smokeStops[3] = {
-            {0.0f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 1.0f)},
-            {0.40f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 1.0f)},
-            {1.0f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.0f)},
+        D2D1_GRADIENT_STOP smokeStops[4] = {
+            {0.0f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.76f)},
+            {0.42f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.62f)},
+            {0.72f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.18f)},
+            {0.92f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.0f)},
         };
         ComPtr<ID2D1GradientStopCollection> smokeCollection;
         if (FAILED(target_->CreateGradientStopCollection(
-            smokeStops, 3, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
+            smokeStops, 4, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
             smokeCollection.ReleaseAndGetAddressOf()))) return false;
 
         if (FAILED(target_->CreateRadialGradientBrush(
@@ -357,11 +391,110 @@ bool Visualizer::CreateEffectBrushes() {
                 D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
             blackActiveCollection.Get(), activeBlackBrushes_[i].ReleaseAndGetAddressOf()))) return false;
     }
+    // Optional effect texture: if creation fails, the visualizer itself remains usable.
+    CreateSmokeWindowBitmap();
     return true;
+}
+
+bool Visualizer::CreateSmokeWindowBitmap() {
+    if (smokeWindowBitmap_) return true;
+    if (!target_ || !wicFactory_) return false;
+
+    // One fixed, large smoke image for the entire canvas.  Drawing it at the
+    // same canvas coordinates through each moving note makes the revealed
+    // portion change naturally as the note travels downward.
+    constexpr UINT textureWidth = 1024;
+    constexpr UINT textureHeight = 576;
+    ComPtr<IWICBitmap> wicBitmap;
+    HRESULT hr = wicFactory_->CreateBitmap(
+        textureWidth, textureHeight, GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapCacheOnLoad, wicBitmap.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return false;
+
+    WICRect rect{0, 0, static_cast<INT>(textureWidth), static_cast<INT>(textureHeight)};
+    ComPtr<IWICBitmapLock> bitmapLock;
+    if (FAILED(wicBitmap->Lock(&rect, WICBitmapLockWrite, bitmapLock.ReleaseAndGetAddressOf()))) {
+        return false;
+    }
+    UINT stride = 0;
+    UINT dataSize = 0;
+    BYTE* pixels = nullptr;
+    if (FAILED(bitmapLock->GetStride(&stride)) ||
+        FAILED(bitmapLock->GetDataPointer(&dataSize, &pixels)) || !pixels ||
+        stride < textureWidth * 4u || dataSize < stride * textureHeight) {
+        return false;
+    }
+
+    const auto smooth = [](float t) {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    const auto lattice = [](int x, int y) {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 0x8DA6B343u ^
+                          static_cast<std::uint32_t>(y) * 0xD8163841u ^ 0xCB1AB31Fu;
+        h ^= h >> 13;
+        h *= 0x85EBCA6Bu;
+        h ^= h >> 16;
+        return static_cast<float>(h & 0x00FFFFFFu) / 16777215.0f;
+    };
+    const auto valueNoise = [&](float u, float v, int cellsX, int cellsY) {
+        const float gx = u * static_cast<float>(cellsX);
+        const float gy = v * static_cast<float>(cellsY);
+        const int x0 = static_cast<int>(std::floor(gx));
+        const int y0 = static_cast<int>(std::floor(gy));
+        const float tx = smooth(gx - static_cast<float>(x0));
+        const float ty = smooth(gy - static_cast<float>(y0));
+        const float a = Lerp(lattice(x0, y0), lattice(x0 + 1, y0), tx);
+        const float b = Lerp(lattice(x0, y0 + 1), lattice(x0 + 1, y0 + 1), tx);
+        return Lerp(a, b, ty);
+    };
+
+    for (UINT y = 0; y < textureHeight; ++y) {
+        BYTE* row = pixels + static_cast<size_t>(y) * stride;
+        const float v = static_cast<float>(y) / static_cast<float>(textureHeight - 1u);
+        for (UINT x = 0; x < textureWidth; ++x) {
+            const float u = static_cast<float>(x) / static_cast<float>(textureWidth - 1u);
+            // Low-frequency warping and multi-scale noise form one continuous
+            // smoke field rather than separate, repeated blobs per note.
+            const float warpX = (valueNoise(u, v, 3, 3) - 0.5f) * 0.18f;
+            const float warpY = (valueNoise(u + 0.37f, v + 0.19f, 3, 2) - 0.5f) * 0.16f;
+            const float wx = u + warpX;
+            const float wy = v + warpY;
+            const float coarse = valueNoise(wx, wy, 3, 2);
+            const float medium = valueNoise(wx, wy, 7, 5);
+            const float fine = valueNoise(wx, wy, 16, 10);
+            const float wisps = 1.0f - std::abs(2.0f * valueNoise(wx, wy, 31, 19) - 1.0f);
+            const float density = 0.53f * coarse + 0.27f * medium +
+                                  0.13f * fine + 0.07f * wisps;
+            // Build an opaque dark backing plus brighter, softly glowing smoke.
+            // Because every pixel is opaque, the background image below the note
+            // cannot bleed through Smoke Window; only this smoke field is revealed.
+            const float broadGlow = smooth((density - 0.27f) / 0.48f);
+            const float smokeBody = smooth((density - 0.34f) / 0.36f);
+            const float brightCore = smooth((density - 0.53f) / 0.24f);
+            const float rValue = 12.0f + broadGlow * 28.0f + smokeBody * 92.0f + brightCore * 118.0f;
+            const float gValue = 17.0f + broadGlow * 38.0f + smokeBody * 112.0f + brightCore * 86.0f;
+            const float bValue = 28.0f + broadGlow * 54.0f + smokeBody * 122.0f + brightCore * 48.0f;
+            const BYTE a = 255;
+            const BYTE r = static_cast<BYTE>(std::lround(std::clamp(rValue, 0.0f, 255.0f)));
+            const BYTE g = static_cast<BYTE>(std::lround(std::clamp(gValue, 0.0f, 255.0f)));
+            const BYTE b = static_cast<BYTE>(std::lround(std::clamp(bValue, 0.0f, 255.0f)));
+            const size_t offset = static_cast<size_t>(x) * 4u;
+            row[offset + 0] = b;
+            row[offset + 1] = g;
+            row[offset + 2] = r;
+            row[offset + 3] = a;
+        }
+    }
+    bitmapLock.Reset();
+    hr = target_->CreateBitmapFromWicBitmap(
+        wicBitmap.Get(), nullptr, smokeWindowBitmap_.ReleaseAndGetAddressOf());
+    return SUCCEEDED(hr);
 }
 
 void Visualizer::DiscardDeviceResources() {
     backgroundBitmap_.Reset();
+    smokeWindowBitmap_.Reset();
     beamBrushes_.clear();
     activeBlackBrushes_.clear();
     whiteKeyBrush_.Reset();
@@ -374,6 +507,7 @@ void Visualizer::DiscardDeviceResources() {
     white_.Reset();
     black_.Reset();
     darkBg_.Reset();
+    waveLineBrush_.Reset();
     offscreenBitmap_.Reset();
 }
 
@@ -474,7 +608,10 @@ void Visualizer::SetTime(double seconds) {
         return;
     }
 
-    double clamped = std::clamp(seconds, -2.0, song_->duration);
+    // Permit a short visual-only outro after the MIDI end. Normal seeking and
+    // the playback slider remain bounded by Duration(); the app advances this
+    // extra interval only to let transient effects finish fading out.
+    double clamped = std::clamp(seconds, -2.0, song_->duration + 2.0);
     if (!effectInitialized_ || std::abs(clamped - currentTime_) > 0.20) {
         ResetEffectSimulation(clamped - 0.001);
     }
@@ -490,6 +627,15 @@ void Visualizer::SetEffectEnabled(EffectFlag flag, bool enabled) {
     if (enabled) effectMask_ |= static_cast<EffectMask>(flag);
     else effectMask_ &= ~static_cast<EffectMask>(flag);
     ResetEffectSimulation(currentTime_ - 0.001);
+}
+
+void Visualizer::SetWaveLineColor(const D2D1::ColorF& color) {
+    waveLineColor_ = D2D1::ColorF(Clamp01(color.r), Clamp01(color.g), Clamp01(color.b), 1.0f);
+    if (waveLineBrush_) waveLineBrush_->SetColor(waveLineColor_);
+}
+
+void Visualizer::SetAmbientParticleCount(int count) {
+    ambientParticleCount_ = std::clamp(count, 0, 200);
 }
 
 bool Visualizer::SetTrackColor(int track, const D2D1::ColorF& color) {
@@ -582,7 +728,18 @@ bool Visualizer::LoadBackgroundImage(const std::wstring& path) {
         backgroundPath_.clear();
         return false;
     }
+
+    // Each newly loaded background starts at the requested default opacity.
+    backgroundOpacity_ = kDefaultBackgroundOpacity;
     return true;
+}
+
+void Visualizer::ResetBackgroundImage() {
+    // Revert to DrawBackground's built-in dark default background.
+    backgroundBitmap_.Reset();
+    backgroundSource_.Reset();
+    backgroundPath_.clear();
+    backgroundOpacity_ = kDefaultBackgroundOpacity;
 }
 
 bool Visualizer::CreateBackgroundBitmap() {
@@ -740,6 +897,37 @@ void Visualizer::DrawNotes(float width, float height) {
         const float velocity01 = Velocity01(n.velocity);
         const float velocityOpacity = VelocityOpacity(n.velocity);
 
+        if (IsEffectEnabled(EffectSmokeWindow) && smokeWindowBitmap_) {
+            // The smoke texture is canvas-anchored: it does not move with an
+            // individual note. A rounded geometry reveals only the part of this
+            // one large image behind the note, so the visible pattern changes as
+            // the note falls through the fixed smoke field.
+            const float noteRadius = std::min(4.0f, w * 0.16f);
+            const auto noteShape = D2D1::RoundedRect(
+                D2D1::RectF(x0, top, x0 + w, bottom), noteRadius, noteRadius);
+            ComPtr<ID2D1RoundedRectangleGeometry> noteMask;
+            if (SUCCEEDED(factory_->CreateRoundedRectangleGeometry(
+                    noteShape, noteMask.ReleaseAndGetAddressOf()))) {
+                const D2D1_LAYER_PARAMETERS layerParams = D2D1::LayerParameters(
+                    D2D1::RectF(x0, top, x0 + w, bottom), noteMask.Get(),
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::Matrix3x2F::Identity(),
+                    1.0f, nullptr, D2D1_LAYER_OPTIONS_NONE);
+                target_->PushLayer(layerParams, nullptr);
+                // Crop the source to the screen-space part behind this note;
+                // the mapping remains anchored to the full canvas while avoiding
+                // a full-canvas bitmap draw for every visible note.
+                const D2D1_RECT_F sourceRect = D2D1::RectF(
+                    std::max(0.0f, x0 / width_ * 1024.0f),
+                    std::max(0.0f, top / height_ * 576.0f),
+                    std::min(1024.0f, (x0 + w) / width_ * 1024.0f),
+                    std::min(576.0f, bottom / height_ * 576.0f));
+                target_->DrawBitmap(
+                    smokeWindowBitmap_.Get(), D2D1::RectF(x0, top, x0 + w, bottom),
+                    0.96f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, sourceRect);
+                target_->PopLayer();
+            }
+        }
+
         if (IsEffectEnabled(EffectNoteGlow)) {
             // Make the glow deliberately strong and distribute it around the entire
             // note rectangle.  The shell layers are opaque enough to remain clearly
@@ -766,7 +954,7 @@ void Visualizer::DrawNotes(float width, float height) {
                 glow, 2.0f);
         }
 
-        brush->SetOpacity(velocityOpacity);
+        brush->SetOpacity(velocityOpacity * (IsEffectEnabled(EffectSmokeWindow) ? 0.24f : 1.0f));
         const float radius = std::min(4.0f, w * 0.16f);
         const auto rr = D2D1::RoundedRect(D2D1::RectF(x0, top, x0 + w, bottom), radius, radius);
         target_->FillRoundedRectangle(rr, brush);
@@ -823,6 +1011,27 @@ void Visualizer::SpawnEffect(const MidiNote& note, int ordinal) {
         (static_cast<std::uint64_t>(note.note) * 2246822519ULL) ^
         (static_cast<std::uint64_t>(ordinal + 1) * 3266489917ULL));
 
+    if (IsEffectEnabled(EffectWaveLine)) {
+        int slot = hitWaveCount_;
+        if (hitWaveCount_ < kMaxHitWaves) {
+            ++hitWaveCount_;
+        } else {
+            slot = 0;
+            for (int i = 1; i < hitWaveCount_; ++i) {
+                if (hitWaves_[i].age > hitWaves_[slot].age) slot = i;
+            }
+        }
+        hitWaves_[slot] = HitWave{};
+        hitWaves_[slot].x = centerX;
+        hitWaves_[slot].age = 0.0f;
+        hitWaves_[slot].maxLife = 2.0f;
+        hitWaves_[slot].amplitude = 0.8f + static_cast<float>(note.velocity) * 0.0116667f;
+    }
+
+    if (IsEffectEnabled(EffectImpactPolygons)) {
+        SpawnImpactShards(centerX, note.track, seed);
+    }
+
     if (IsEffectEnabled(EffectRipple) && rippleCount_ < kMaxRipples) {
         Ripple& r = ripples_[rippleCount_++];
         r.x = centerX + (Random01(seed) - 0.5f) * effectWidth * 0.24f;
@@ -877,6 +1086,27 @@ void Visualizer::SpawnEffect(const MidiNote& note, int ordinal) {
     }
 }
 
+void Visualizer::SpawnImpactShards(float centerX, int track, std::uint32_t seed) {
+    constexpr int kShardsPerHit = 3;
+    constexpr float kTwoPi = 6.2831853071795864769f;
+    for (int i = 0; i < kShardsPerHit; ++i) {
+        if (impactShardCount_ >= kMaxImpactShards) break;
+        ImpactShard& shard = impactShards_[impactShardCount_++];
+        const float angle = Random01(seed) * kTwoPi;
+        const float speed = 50.0f + Random01(seed) * 125.0f;
+        shard.x = centerX + (Random01(seed) - 0.5f) * 7.0f;
+        shard.y = hitY_ - 1.0f;
+        shard.vx = std::cos(angle) * speed;
+        shard.vy = std::sin(angle) * speed - 30.0f;
+        shard.angle = Random01(seed) * 360.0f;
+        shard.spin = (Random01(seed) - 0.5f) * 720.0f;
+        shard.life = 0.36f + Random01(seed) * 0.14f;
+        shard.maxLife = shard.life;
+        shard.size = 6.0f;
+        shard.track = track;
+    }
+}
+
 void Visualizer::SpawnSmokeBurst(const MidiNote& note, std::int64_t emissionIndex) {
     if (!IsEffectEnabled(EffectSmokeGlow) || particleCount_ >= kMaxParticles) return;
     if (note.note < kFirstKey || note.note > kLastKey) return;
@@ -899,7 +1129,7 @@ void Visualizer::SpawnSmokeBurst(const MidiNote& note, std::int64_t emissionInde
         const float xRandom = 0.15f + Random01(seed) * 0.70f;
         const float angle = -3.14159265358979323846f * 0.5f +
             (Random01(seed) - 0.5f) * 0.35f;
-        const float speed = (Random01(seed) * 110.0f + 70.0f) * scale;
+        const float speed = (Random01(seed) * 110.0f + 70.0f) * scale * 0.90f;
         p.x = (centerX - effectWidth * 0.5f) + effectWidth * xRandom;
         p.y = hitY_ - 2.0f;
         p.vx = std::cos(angle) * speed;
@@ -944,7 +1174,7 @@ void Visualizer::SpawnCrossBurst(const MidiNote& note, std::int64_t emissionInde
         p.x = (centerX - effectWidth * 0.5f) + effectWidth * xRandom;
         p.y = hitY_ - 2.0f;
         p.vx = std::cos(angle) * speed;
-        p.vy = std::sin(angle) * speed;
+        p.vy = std::sin(angle) * speed - 12.0f;
         p.life = 0.70f + Random01(seed) * 0.75f;
         p.maxLife = p.life;
         p.size = (0.75f + Random01(seed) * 1.15f) * scale;
@@ -962,6 +1192,8 @@ void Visualizer::SpawnCrossBurst(const MidiNote& note, std::int64_t emissionInde
 void Visualizer::ResetEffectSimulation(double time) {
     particleCount_ = 0;
     rippleCount_ = 0;
+    impactShardCount_ = 0;
+    hitWaveCount_ = 0;
     effectSimTime_ = time;
     effectInitialized_ = true;
 }
@@ -1073,6 +1305,34 @@ void Visualizer::UpdateEffects() {
     } else {
         rippleCount_ = 0;
     }
+
+    for (int i = hitWaveCount_ - 1; i >= 0; --i) {
+        HitWave& wave = hitWaves_[i];
+        wave.age += static_cast<float>(dt);
+        if (wave.age >= wave.maxLife) {
+            --hitWaveCount_;
+            if (i != hitWaveCount_) hitWaves_[i] = hitWaves_[hitWaveCount_];
+        }
+    }
+
+    if (IsEffectEnabled(EffectImpactPolygons)) {
+        for (int i = impactShardCount_ - 1; i >= 0; --i) {
+            ImpactShard& shard = impactShards_[i];
+            shard.life -= static_cast<float>(dt);
+            if (shard.life <= 0.0f) {
+                --impactShardCount_;
+                if (i != impactShardCount_) impactShards_[i] = impactShards_[impactShardCount_];
+                continue;
+            }
+            shard.x += shard.vx * static_cast<float>(dt);
+            shard.y += shard.vy * static_cast<float>(dt);
+            shard.vy += 310.0f * static_cast<float>(dt);
+            shard.vx *= std::pow(0.985f, static_cast<float>(dt) * 60.0f);
+            shard.angle += shard.spin * static_cast<float>(dt);
+        }
+    } else {
+        impactShardCount_ = 0;
+    }
     effectSimTime_ = time;
 }
 
@@ -1106,9 +1366,10 @@ void Visualizer::DrawEffects(float width, float height) {
                 smoke->SetRadiusX(std::max(1.0f, currentSize));
                 smoke->SetRadiusY(std::max(1.0f, currentSize));
                 smoke->SetOpacity(alpha);
-                target_->FillEllipse(
-                    D2D1::Ellipse(D2D1::Point2F(p.x, p.y), currentSize * 0.70f,
-                                  currentSize * 1.30f), smoke);
+                const D2D1_ELLIPSE smokeEllipse = D2D1::Ellipse(
+                    D2D1::Point2F(p.x, p.y), currentSize * 0.70f, currentSize * 1.30f);
+                target_->FillEllipse(smokeEllipse, smoke);
+
             }
         }
 
@@ -1187,9 +1448,7 @@ void Visualizer::DrawEffects(float width, float height) {
                 const auto ellipse = D2D1::Ellipse(
                     D2D1::Point2F(ripple.x, ripple.y), ripple.radius, ripple.radius);
 
-                // Soft outer halo, followed by a brighter core line.  Drawing
-                // several progressively thinner rings keeps the ripple legible
-                // without making the center look like a solid disk.
+                // Draw only the expanding rings; the center stays unlit.
                 brush->SetOpacity(fade2 * 0.10f);
                 target_->DrawEllipse(ellipse, brush, ripple.thickness + 7.0f);
                 brush->SetOpacity(fade2 * 0.20f);
@@ -1198,10 +1457,6 @@ void Visualizer::DrawEffects(float width, float height) {
                 target_->DrawEllipse(ellipse, brush, ripple.thickness + 2.0f);
                 brush->SetOpacity(fade2 * 0.95f);
                 target_->DrawEllipse(ellipse, brush, ripple.thickness);
-                brush->SetOpacity(fade2 * 0.22f);
-                target_->FillEllipse(
-                    D2D1::Ellipse(D2D1::Point2F(ripple.x, ripple.y),
-                                  ripple.radius * 0.72f, ripple.radius * 0.72f), brush);
             }
         }
 
@@ -1248,7 +1503,181 @@ void Visualizer::DrawEffects(float width, float height) {
         target_->PopAxisAlignedClip();
     }
 
+    if (IsEffectEnabled(EffectImpactPolygons) && triangleGeometry_) {
+        D2D1_MATRIX_3X2_F oldTransform{};
+        target_->GetTransform(&oldTransform);
+        for (int i = 0; i < impactShardCount_; ++i) {
+            const ImpactShard& shard = impactShards_[i];
+            if (shard.life <= 0.0f) continue;
+            const float fade = Clamp01(shard.life / shard.maxLife);
+            const float scale = shard.size;
+            ID2D1SolidColorBrush* fill = NoteBrushForTrack(shard.track);
+            fill->SetOpacity(fade * 0.86f);
+            const D2D1::Matrix3x2F shardTransform =
+                D2D1::Matrix3x2F::Scale(scale, scale) *
+                D2D1::Matrix3x2F::Rotation(shard.angle) *
+                D2D1::Matrix3x2F::Translation(shard.x, shard.y);
+            target_->SetTransform(&shardTransform);
+            target_->FillGeometry(triangleGeometry_.Get(), fill);
+            white_->SetOpacity(fade * 0.62f);
+            target_->DrawGeometry(triangleGeometry_.Get(), white_.Get(), 0.45f);
+            fill->SetOpacity(1.0f);
+        }
+        target_->SetTransform(&oldTransform);
+        white_->SetOpacity(1.0f);
+    }
+
+    if (IsEffectEnabled(EffectWaveLine)) DrawWaveLine(width);
+
     white_->SetOpacity(1.0f);
+}
+
+void Visualizer::DrawWaveLine(float width) {
+    if (!waveLineBrush_ || width <= 1.0f) return;
+    const bool noteGlowEnabled = IsEffectEnabled(EffectNoteGlow);
+    const D2D1::ColorF configuredColor = waveLineColor_;
+    if (noteGlowEnabled) {
+        // Keep the selected hue but move it toward white and increase the halo
+        // while Note Glow is enabled, so the hit wave shares the same visual cue.
+        waveLineBrush_->SetColor(D2D1::ColorF(
+            Lerp(configuredColor.r, 1.0f, 0.48f),
+            Lerp(configuredColor.g, 1.0f, 0.48f),
+            Lerp(configuredColor.b, 1.0f, 0.48f), 1.0f));
+    } else {
+        waveLineBrush_->SetColor(configuredColor);
+    }
+    const int segments = std::clamp(static_cast<int>(width / 4.0f), 48, 1800);
+    constexpr float kBaseline = -1.5f;
+    constexpr float kWaveSpeed = 260.0f;
+    constexpr float kWaveLength = 58.0f;
+    constexpr float kEnvelopeWidth = 38.0f;
+    constexpr float kPropagationDecayDistance = 560.0f;
+
+    auto yAt = [&](float x, float ageLag) {
+        float offset = 0.0f;
+        for (int i = 0; i < hitWaveCount_; ++i) {
+            const HitWave& wave = hitWaves_[i];
+            const float age = wave.age - ageLag;
+            if (age < 0.0f || age >= wave.maxLife) continue;
+            const float distance = std::abs(x - wave.x);
+            const float front = age * kWaveSpeed;
+            const float edgeDistance = distance - front;
+            const float propagationFade = std::exp(-front / kPropagationDecayDistance);
+            const float envelope = std::exp(-std::abs(edgeDistance) / kEnvelopeWidth) *
+                propagationFade * (1.0f - Clamp01(age / wave.maxLife));
+            offset += std::sin(edgeDistance * (6.28318530718f / kWaveLength)) *
+                wave.amplitude * envelope;
+        }
+        return std::clamp(hitY_ + kBaseline + offset, hitY_ - 24.0f, hitY_ + 24.0f);
+    };
+
+    auto drawCurve = [&](float ageLag, bool afterimage, float strength) {
+        std::vector<D2D1_POINT_2F> points(static_cast<std::size_t>(segments) + 1u);
+        for (int i = 0; i <= segments; ++i) {
+            const float x = width * static_cast<float>(i) / static_cast<float>(segments);
+            points[static_cast<std::size_t>(i)] = D2D1::Point2F(x, yAt(x, ageLag));
+        }
+
+        if (afterimage) {
+            // Draw older wave positions beneath the current line. Only segments
+            // that still carry a displacement are drawn, avoiding a second full
+            // horizontal baseline while leaving a subtle aqua trail behind the fronts.
+            const float baseline = hitY_ + kBaseline;
+            const float opacity[] = {
+                (noteGlowEnabled ? 0.18f : 0.12f) * strength,
+                (noteGlowEnabled ? 0.36f : 0.28f) * strength};
+            const float thickness[] = {
+                noteGlowEnabled ? 7.0f : 5.5f,
+                noteGlowEnabled ? 2.8f : 2.2f};
+            for (int pass = 0; pass < 2; ++pass) {
+                waveLineBrush_->SetOpacity(opacity[pass]);
+                for (int i = 1; i <= segments; ++i) {
+                    const auto& a = points[static_cast<std::size_t>(i - 1)];
+                    const auto& b = points[static_cast<std::size_t>(i)];
+                    if (std::abs(a.y - baseline) < 0.035f && std::abs(b.y - baseline) < 0.035f) continue;
+                    target_->DrawLine(a, b, waveLineBrush_.Get(), thickness[pass]);
+                }
+            }
+        } else {
+            // Broad halo, colored core, and fine highlight for the live wave.
+            // Note Glow increases each layer's opacity and width for a stronger bloom.
+            const float opacity[] = {
+                noteGlowEnabled ? 0.28f : 0.16f,
+                noteGlowEnabled ? 0.60f : 0.44f,
+                noteGlowEnabled ? 1.00f : 0.88f};
+            const float thickness[] = {
+                noteGlowEnabled ? 14.0f : 10.0f,
+                noteGlowEnabled ? 5.2f : 4.0f,
+                noteGlowEnabled ? 1.65f : 1.25f};
+            for (int pass = 0; pass < 3; ++pass) {
+                waveLineBrush_->SetOpacity(opacity[pass]);
+                for (int i = 1; i <= segments; ++i) {
+                    target_->DrawLine(points[static_cast<std::size_t>(i - 1)],
+                                      points[static_cast<std::size_t>(i)],
+                                      waveLineBrush_.Get(), thickness[pass]);
+                }
+            }
+        }
+    };
+
+    // Older positions form a subtle afterimage behind the outward-moving wave.
+    drawCurve(0.22f, true, 0.55f);
+    drawCurve(0.11f, true, 0.82f);
+    drawCurve(0.0f, false, 1.0f);
+    waveLineBrush_->SetOpacity(1.0f);
+    waveLineBrush_->SetColor(configuredColor);
+}
+
+void Visualizer::DrawAmbientParticles(float width, float height) {
+    if (width <= 1.0f || height <= 1.0f || !white_) return;
+    constexpr float kTwoPi = 6.28318530718f;
+    const int ambientCount = std::clamp(ambientParticleCount_, 0, 200);
+    const float time = static_cast<float>(std::max(0.0, currentTime_));
+    // White Particles belong only to the falling-note area. Clip all glow and
+    // sparkle strokes at the keyboard boundary so none can spill onto the keys.
+    const float particleAreaHeight = std::clamp(hitY_, 1.0f, height);
+    target_->PushAxisAlignedClip(
+        D2D1::RectF(0.0f, 0.0f, width, particleAreaHeight),
+        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    for (int i = 0; i < ambientCount; ++i) {
+        const auto random = [i](std::uint32_t channel) {
+            return AmbientRandom01(static_cast<std::uint32_t>(i + 1), channel);
+        };
+        // Every property is sampled independently for each particle. The values
+        // are stable across frames (and offline video rendering), but do not form
+        // rows or columns; slightly different horizontal drift breaks vertical tracks.
+        const float baseX = random(0u) * width;
+        const float baseY = random(1u) * particleAreaHeight;
+        const float speed = 4.0f + random(2u) * 17.0f;
+        const float size = 0.82f + random(3u) * 2.05f;
+        const float phase = random(4u) * kTwoPi;
+        const float driftPhase = random(5u) * kTwoPi;
+        const float driftAmplitude = 5.0f + random(6u) * 22.0f;
+        const float driftRate = 0.18f + random(7u) * 0.32f;
+        const float twinkleRate = 0.75f + random(8u) * 0.90f;
+
+        float x = std::fmod(baseX + std::sin(time * driftRate + driftPhase) * driftAmplitude +
+                            std::sin(time * 0.13f + phase * 1.7f) * driftAmplitude * 0.28f, width);
+        if (x < 0.0f) x += width;
+        float y = std::fmod(baseY + time * speed, particleAreaHeight);
+        if (y < 0.0f) y += particleAreaHeight;
+
+        const float twinkle = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(time * twinkleRate + phase));
+        white_->SetOpacity(0.17f * twinkle);
+        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), size * 3.8f, size * 3.8f), white_.Get());
+        white_->SetOpacity(0.84f * twinkle);
+        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), size, size), white_.Get());
+        if (size > 1.9f) {
+            white_->SetOpacity(0.30f * twinkle);
+            target_->DrawLine(D2D1::Point2F(x - size * 2.3f, y),
+                              D2D1::Point2F(x + size * 2.3f, y), white_.Get(), 0.7f);
+            target_->DrawLine(D2D1::Point2F(x, y - size * 2.3f),
+                              D2D1::Point2F(x, y + size * 2.3f), white_.Get(), 0.7f);
+        }
+    }
+    white_->SetOpacity(1.0f);
+    target_->PopAxisAlignedClip();
 }
 
 void Visualizer::DrawKeyboard(float width, float height) {
@@ -1392,6 +1821,9 @@ void Visualizer::Render() {
 
     target_->BeginDraw();
     DrawBackground(w, h);
+    // Ambient White Particles form a background layer: draw them before guides
+    // and notes so they are visible through the note area but never over notes.
+    if (IsEffectEnabled(EffectAmbientParticles)) DrawAmbientParticles(w, h);
     DrawNoteGuides(w, h);
     DrawNotes(w, h);
     DrawKeyboard(w, h);

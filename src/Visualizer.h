@@ -28,6 +28,10 @@ public:
         EffectDiamondRipple = 1u << 3,
         EffectNoteGlow = 1u << 4,
         EffectCrossSpark = 1u << 5,
+        EffectWaveLine = 1u << 6,
+        EffectSmokeWindow = 1u << 7,
+        EffectAmbientParticles = 1u << 8,
+        EffectImpactPolygons = 1u << 9,
     };
     using EffectMask = std::uint32_t;
 
@@ -47,8 +51,9 @@ public:
     float FallSpeed() const { return fallSpeed_; }
 
     bool LoadBackgroundImage(const std::wstring& path);
+    void ResetBackgroundImage();
     void SetBackgroundOpacity(float opacity);
-    static constexpr float kDefaultBackgroundOpacity = 0.40f;
+    static constexpr float kDefaultBackgroundOpacity = 0.30f;
     float BackgroundOpacity() const { return backgroundOpacity_; }
     bool HasBackgroundImage() const { return !backgroundPath_.empty(); }
 
@@ -58,6 +63,10 @@ public:
     EffectMask GetEffectMask() const { return effectMask_; }
     void SetEffectEnabled(EffectFlag flag, bool enabled);
     bool IsEffectEnabled(EffectFlag flag) const { return (effectMask_ & flag) != 0; }
+    void SetWaveLineColor(const D2D1::ColorF& color);
+    void SetAmbientParticleCount(int count);
+    int AmbientParticleCount() const { return ambientParticleCount_; }
+    D2D1::ColorF GetWaveLineColor() const { return waveLineColor_; }
 
     bool SetTrackColor(int track, const D2D1::ColorF& color);
     void ResetTrackColors();
@@ -69,6 +78,8 @@ public:
 private:
     static constexpr int kMaxParticles = 1800;
     static constexpr int kMaxRipples = 512;
+    static constexpr int kMaxImpactShards = 480;
+    static constexpr int kMaxHitWaves = 96;
     static constexpr int kDefaultPaletteCount = 4;
     static constexpr int kCinemaParticleCount = 16;
     static constexpr float kSmokeEmissionInterval = 0.12f;
@@ -95,6 +106,26 @@ private:
         bool crossSpark = false;
     };
 
+    struct ImpactShard {
+        float x = 0.0f;
+        float y = 0.0f;
+        float vx = 0.0f;
+        float vy = 0.0f;
+        float angle = 0.0f;
+        float spin = 0.0f;
+        float life = 0.0f;
+        float maxLife = 0.0f;
+        float size = 1.0f;
+        int track = 0;
+    };
+
+    struct HitWave {
+        float x = 0.0f;
+        float age = 0.0f;
+        float maxLife = 2.0f;
+        float amplitude = 1.33f;
+    };
+
     struct Ripple {
         float x = 0.0f;
         float y = 0.0f;
@@ -115,6 +146,7 @@ private:
     bool LoadBackgroundSource();
     bool CreateC4LabelFormat();
     bool CreateEffectBrushes();
+    bool CreateSmokeWindowBitmap();
     bool InitializeOffscreen(const Visualizer& source, UINT width, UINT height);
     void ResetEffectSimulation(double time);
     void UpdateActiveNotes();
@@ -123,6 +155,9 @@ private:
     void SpawnSmokeBurst(const MidiNote& note, std::int64_t emissionIndex);
     void SpawnCrossBurst(const MidiNote& note, std::int64_t emissionIndex);
     void DrawEffects(float width, float height);
+    void DrawWaveLine(float width);
+    void DrawAmbientParticles(float width, float height);
+    void SpawnImpactShards(float centerX, int track, std::uint32_t seed);
     void RebuildGeometry(float width, float height);
     void DrawBackground(float width, float height);
     void DrawNoteGuides(float width, float height);
@@ -156,6 +191,8 @@ private:
     std::vector<Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush>> smokeBrushes_;
     std::vector<Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> beamBrushes_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> darkBg_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> waveLineBrush_;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> triangleGeometry_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> whiteKeyBrush_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> blackKeyBrush_;
     std::vector<Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> activeBlackBrushes_;
@@ -166,6 +203,7 @@ private:
     Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory_;
     Microsoft::WRL::ComPtr<IWICBitmapSource> backgroundSource_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> backgroundBitmap_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> smokeWindowBitmap_;
     std::wstring backgroundPath_;
     float backgroundOpacity_ = kDefaultBackgroundOpacity;
 
@@ -183,12 +221,18 @@ private:
     float keyboardHeight_ = 160.0f;
     float hitY_ = 500.0f;
 
-    EffectMask effectMask_ = EffectSmokeGlow | EffectCrossSpark;
+    EffectMask effectMask_ = EffectSmokeGlow | EffectCrossSpark | EffectWaveLine;
     bool showNoteGuides_ = true;
+    D2D1::ColorF waveLineColor_ = D2D1::ColorF(0.24f, 0.82f, 0.94f, 1.0f);
+    int ambientParticleCount_ = 40;
     std::array<Particle, kMaxParticles> particles_{};
     int particleCount_ = 0;
     std::array<Ripple, kMaxRipples> ripples_{};
     int rippleCount_ = 0;
+    std::array<ImpactShard, kMaxImpactShards> impactShards_{};
+    int impactShardCount_ = 0;
+    std::array<HitWave, kMaxHitWaves> hitWaves_{};
+    int hitWaveCount_ = 0;
     double effectSimTime_ = -0.001;
     bool effectInitialized_ = false;
     std::array<int, 128> activeTracks_{};

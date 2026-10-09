@@ -40,6 +40,8 @@ Visualizer g_visualizer;
 MidiSong g_song;
 SimpleSynth g_simpleSynth;
 bool g_playing = false;
+bool g_effectTailRunning = false;
+std::chrono::steady_clock::time_point g_effectTailStart;
 bool g_positionDragging = false;
 bool g_resumeAfterSeek = false;
 bool g_volumeDragging = false;
@@ -149,6 +151,26 @@ std::wstring FormatTrackColorLabel(int track) {
                static_cast<int>(color.b * 255.0f + 0.5f),
                g_visualizer.HasCustomTrackColor(track) ? L" (custom)" : L" (default)");
     return buf;
+}
+
+void OpenWaveLineColor(HWND owner) {
+    const auto color = g_visualizer.GetWaveLineColor();
+    CHOOSECOLORW cc{};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = owner;
+    cc.rgbResult = RGB(static_cast<int>(color.r * 255.0f + 0.5f),
+                       static_cast<int>(color.g * 255.0f + 0.5f),
+                       static_cast<int>(color.b * 255.0f + 0.5f));
+    cc.lpCustColors = g_customColors;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+
+    g_visualizer.SetWaveLineColor(D2D1::ColorF(
+        GetRValue(cc.rgbResult) / 255.0f,
+        GetGValue(cc.rgbResult) / 255.0f,
+        GetBValue(cc.rgbResult) / 255.0f,
+        1.0f));
+    InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
 }
 
 void UpdateTrackColorUi() {
@@ -267,6 +289,8 @@ void UpdateControlUi() {
         EnableWindow(GetDlgItem(g_controlHwnd, IDC_BG_OPACITY_SLIDER), FALSE);
         SendDlgItemMessageW(g_controlHwnd, IDC_BG_OPACITY_SLIDER, TBM_SETPOS, TRUE, 0);
     }
+    EnableWindow(GetDlgItem(g_controlHwnd, IDC_BTN_BACKGROUND_RESET),
+                  g_visualizer.HasBackgroundImage() ? TRUE : FALSE);
 
     const bool hasSong = duration > 0.0;
     auto setEnabledIfChanged = [&](int id, bool enabled) {
@@ -284,6 +308,7 @@ void UpdateControlUi() {
 
 void TogglePlay() {
     if (g_visualizer.Duration() <= 0.0) return;
+    g_effectTailRunning = false;
     if (g_playing) {
         g_playing = false;
         g_visualizer.SetPlaying(false);
@@ -304,6 +329,7 @@ void ResetPlayback() {
     StopAudioPlayback();
     g_visualizer.Reset();
     g_playing = false;
+    g_effectTailRunning = false;
     g_visualizer.SetPlaying(false);
     g_playbackBaseTime = 0.0;
     g_playbackEpoch = std::chrono::steady_clock::now();
@@ -341,6 +367,14 @@ void OpenBackground(HWND owner) {
     InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
 }
 
+void ResetBackground(HWND owner) {
+    (void)owner;
+    g_visualizer.ResetBackgroundImage();
+    SetControlText(IDC_LABEL_BACKGROUND, L"(No background)");
+    UpdateControlUi();
+    InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+}
+
 void OpenMidi(HWND owner) {
     wchar_t path[MAX_PATH]{};
     OPENFILENAMEW ofn{};
@@ -364,6 +398,7 @@ void OpenMidi(HWND owner) {
     g_visualizer.SetPlaying(false);
     g_song = std::move(newSong);
     g_fileName = BaseName(path);
+    g_effectTailRunning = false;
     g_visualizer.SetSong(&g_song);
     RebuildTrackCombo();
     g_visualizer.SetTime(0.0);
@@ -770,6 +805,14 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendDlgItemMessageW(hwnd, IDC_BG_OPACITY_SLIDER, TBM_SETPOS, TRUE,
                             static_cast<LPARAM>(g_visualizer.BackgroundOpacity() * 100.0f + 0.5f));
 
+        SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
+        SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETPAGESIZE, 0, 10);
+        SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETTICFREQ, 25, 0);
+        SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETPOS, TRUE,
+                            static_cast<LPARAM>(g_visualizer.AmbientParticleCount()));
+        SetControlText(IDC_LABEL_AMBIENT_PARTICLES,
+                       std::to_wstring(g_visualizer.AmbientParticleCount()));
+
         SendDlgItemMessageW(hwnd, IDC_VOLUME_SLIDER, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
         SendDlgItemMessageW(hwnd, IDC_VOLUME_SLIDER, TBM_SETPOS, TRUE,
                             static_cast<LPARAM>(g_simpleSynth.MasterVolume() * 100.0f + 0.5f));
@@ -781,14 +824,20 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendDlgItemMessageW(hwnd, IDC_EFFECT_DIAMOND_RIPPLE, BM_SETCHECK, BST_UNCHECKED, 0);
         SendDlgItemMessageW(hwnd, IDC_EFFECT_NOTE_GLOW, BM_SETCHECK, BST_UNCHECKED, 0);
         SendDlgItemMessageW(hwnd, IDC_EFFECT_CROSS_SPARK, BM_SETCHECK, BST_CHECKED, 0);
+        SendDlgItemMessageW(hwnd, IDC_EFFECT_WAVE_LINE, BM_SETCHECK, BST_CHECKED, 0);
+        SendDlgItemMessageW(hwnd, IDC_EFFECT_SMOKE_WINDOW, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendDlgItemMessageW(hwnd, IDC_EFFECT_AMBIENT_PARTICLES, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendDlgItemMessageW(hwnd, IDC_EFFECT_IMPACT_POLYGONS, BM_SETCHECK, BST_UNCHECKED, 0);
         SendDlgItemMessageW(hwnd, IDC_NOTE_GUIDES, BM_SETCHECK, BST_CHECKED, 0);
-        g_visualizer.SetEffectMask(Visualizer::EffectSmokeGlow | Visualizer::EffectCrossSpark);
+        g_visualizer.SetEffectMask(Visualizer::EffectSmokeGlow | Visualizer::EffectCrossSpark |
+                                   Visualizer::EffectWaveLine);
         g_visualizer.SetNoteGuideLinesEnabled(true);
 
         EnableWindow(GetDlgItem(hwnd, IDC_TRACK_COMBO), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_TRACK_COLOR), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_TRACK_RESET), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BG_OPACITY_SLIDER), FALSE);
+        EnableWindow(GetDlgItem(hwnd, IDC_BTN_BACKGROUND_RESET), FALSE);
         SendDlgItemMessageW(hwnd, IDC_ENABLE_AUDIO, BM_SETCHECK, BST_CHECKED, 0);
         UpdateControlUi();
         SetTimer(hwnd, TIMER_CONTROL_REFRESH, 100, nullptr);
@@ -814,6 +863,13 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
             return TRUE;
         }
+        if (control == GetDlgItem(hwnd, IDC_AMBIENT_PARTICLES_SLIDER)) {
+            const int count = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
+            g_visualizer.SetAmbientParticleCount(count);
+            SetControlText(IDC_LABEL_AMBIENT_PARTICLES, std::to_wstring(count));
+            InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+            return TRUE;
+        }
         if (control == GetDlgItem(hwnd, IDC_VOLUME_SLIDER)) {
             g_volumeDragging = true;
             const int volume = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
@@ -824,6 +880,7 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (control == GetDlgItem(hwnd, IDC_POSITION_SLIDER)) {
             if (!g_positionDragging) {
+                g_effectTailRunning = false;
                 g_positionDragging = true;
                 g_resumeAfterSeek = g_playing;
                 if (g_resumeAfterSeek) StopAudioPlayback();
@@ -859,6 +916,9 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         case IDC_BTN_BACKGROUND:
             OpenBackground(hwnd);
+            return TRUE;
+        case IDC_BTN_BACKGROUND_RESET:
+            ResetBackground(hwnd);
             return TRUE;
         case IDC_BTN_RENDER:
             OpenRenderDialog(hwnd);
@@ -952,6 +1012,44 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == BN_CLICKED) {
                 const bool checked = SendMessageW(GetDlgItem(hwnd, IDC_EFFECT_CROSS_SPARK), BM_GETCHECK, 0, 0) == BST_CHECKED;
                 g_visualizer.SetEffectEnabled(Visualizer::EffectCrossSpark, checked);
+                InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+                return TRUE;
+            }
+            break;
+        case IDC_EFFECT_WAVE_LINE:
+            if (HIWORD(wp) == BN_CLICKED) {
+                const bool checked = SendMessageW(GetDlgItem(hwnd, IDC_EFFECT_WAVE_LINE), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                g_visualizer.SetEffectEnabled(Visualizer::EffectWaveLine, checked);
+                InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+                return TRUE;
+            }
+            break;
+        case IDC_BTN_WAVE_COLOR:
+            if (HIWORD(wp) == BN_CLICKED) {
+                OpenWaveLineColor(hwnd);
+                return TRUE;
+            }
+            break;
+        case IDC_EFFECT_SMOKE_WINDOW:
+            if (HIWORD(wp) == BN_CLICKED) {
+                const bool checked = SendMessageW(GetDlgItem(hwnd, IDC_EFFECT_SMOKE_WINDOW), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                g_visualizer.SetEffectEnabled(Visualizer::EffectSmokeWindow, checked);
+                InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+                return TRUE;
+            }
+            break;
+        case IDC_EFFECT_AMBIENT_PARTICLES:
+            if (HIWORD(wp) == BN_CLICKED) {
+                const bool checked = SendMessageW(GetDlgItem(hwnd, IDC_EFFECT_AMBIENT_PARTICLES), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                g_visualizer.SetEffectEnabled(Visualizer::EffectAmbientParticles, checked);
+                InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+                return TRUE;
+            }
+            break;
+        case IDC_EFFECT_IMPACT_POLYGONS:
+            if (HIWORD(wp) == BN_CLICKED) {
+                const bool checked = SendMessageW(GetDlgItem(hwnd, IDC_EFFECT_IMPACT_POLYGONS), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                g_visualizer.SetEffectEnabled(Visualizer::EffectImpactPolygons, checked);
                 InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
                 return TRUE;
             }
@@ -1061,20 +1159,28 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         if (!running) break;
 
         const auto now = Clock::now();
-        if (g_playing && !g_positionDragging && now >= nextFrame) {
-            double elapsed = std::chrono::duration<double>(now - g_playbackEpoch).count();
-            if (elapsed < 0.0) elapsed = 0.0;
-            double nextTime = g_playbackBaseTime + elapsed;
-            if (nextTime > g_visualizer.Duration()) nextTime = g_visualizer.Duration();
+        if ((g_playing || g_effectTailRunning) && !g_positionDragging && now >= nextFrame) {
+            if (g_playing) {
+                double elapsed = std::chrono::duration<double>(now - g_playbackEpoch).count();
+                if (elapsed < 0.0) elapsed = 0.0;
+                const double nextTime = g_playbackBaseTime + elapsed;
 
-            if (g_visualizer.Duration() > 0.0 && nextTime >= g_visualizer.Duration()) {
-                g_visualizer.SetTime(g_visualizer.Duration());
-                g_playing = false;
-                g_visualizer.SetPlaying(false);
-                StopAudioPlayback();
-                UpdateControlUi();
-            } else {
-                g_visualizer.SetTime(nextTime);
+                if (g_visualizer.Duration() > 0.0 && nextTime >= g_visualizer.Duration()) {
+                    g_visualizer.SetTime(g_visualizer.Duration());
+                    g_playing = false;
+                    g_effectTailRunning = true;
+                    g_effectTailStart = now;
+                    g_visualizer.SetPlaying(false);
+                    StopAudioPlayback();
+                    UpdateControlUi();
+                } else {
+                    g_visualizer.SetTime(nextTime);
+                }
+            } else if (g_effectTailRunning) {
+                const double tailElapsed = std::chrono::duration<double>(now - g_effectTailStart).count();
+                const double tailDuration = VideoRenderer::kTailSeconds;
+                g_visualizer.SetTime(g_visualizer.Duration() + std::min(tailElapsed, tailDuration));
+                if (tailElapsed >= tailDuration) g_effectTailRunning = false;
             }
 
             do { nextFrame += kFramePeriod; } while (nextFrame <= now);

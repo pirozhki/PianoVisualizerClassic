@@ -257,6 +257,10 @@ bool VideoRenderer::RenderMp4(const Visualizer& visualizer,
 
         renderVisualizer.target_->BeginDraw();
         renderVisualizer.DrawBackground(renderVisualizer.width_, renderVisualizer.height_);
+        // Keep White Particles behind notes in offline frames as in realtime.
+        if (renderVisualizer.IsEffectEnabled(Visualizer::EffectAmbientParticles)) {
+            renderVisualizer.DrawAmbientParticles(renderVisualizer.width_, renderVisualizer.height_);
+        }
         renderVisualizer.DrawNoteGuides(renderVisualizer.width_, renderVisualizer.height_);
         renderVisualizer.DrawNotes(renderVisualizer.width_, renderVisualizer.height_);
         renderVisualizer.DrawKeyboard(renderVisualizer.width_, renderVisualizer.height_);
