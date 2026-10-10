@@ -9,12 +9,16 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "MidiFile.h"
+#include "BackgroundVideoDecoder.h"
+
+#include <memory>
 
 class VideoRenderer;
 
@@ -43,6 +47,10 @@ public:
     void Resize(UINT width, UINT height);
     void SetSong(const MidiSong* song);
     void SetPlaying(bool playing);
+    // While the user drags the playback-position slider, request video frames
+    // asynchronously so the UI remains responsive. The final position is
+    // decoded synchronously when interactive seeking ends.
+    void SetInteractiveSeeking(bool seeking) { interactiveSeeking_ = seeking; }
     void Reset();
     void SetTime(double seconds);
     double Time() const { return currentTime_; }
@@ -51,11 +59,20 @@ public:
     float FallSpeed() const { return fallSpeed_; }
 
     bool LoadBackgroundImage(const std::wstring& path);
+    bool LoadBackgroundVideo(const std::wstring& path, std::wstring& error);
     void ResetBackgroundImage();
     void SetBackgroundOpacity(float opacity);
     static constexpr float kDefaultBackgroundOpacity = 0.30f;
     float BackgroundOpacity() const { return backgroundOpacity_; }
-    bool HasBackgroundImage() const { return !backgroundPath_.empty(); }
+    bool HasBackground() const { return !backgroundPath_.empty(); }
+    bool HasBackgroundVideo() const { return backgroundIsVideo_; }
+    static constexpr int kMinVideoOffsetMilliseconds = -10000;
+    static constexpr int kMaxVideoOffsetMilliseconds = 10000;
+    void SetVideoOffsetMilliseconds(int milliseconds) {
+        videoOffsetMilliseconds_ = std::clamp(
+            milliseconds, kMinVideoOffsetMilliseconds, kMaxVideoOffsetMilliseconds);
+    }
+    int VideoOffsetMilliseconds() const { return videoOffsetMilliseconds_; }
 
     void SetEffectMask(EffectMask mask);
     void SetNoteGuideLinesEnabled(bool enabled) { showNoteGuides_ = enabled; }
@@ -143,12 +160,15 @@ private:
     bool CreateDeviceResources();
     bool CreateDrawingResources();
     bool CreateBackgroundBitmap();
+    void ClearBackgroundVideoState();
     bool LoadBackgroundSource();
     bool CreateC4LabelFormat();
     bool CreateEffectBrushes();
     bool CreateSmokeWindowBitmap();
     bool InitializeOffscreen(const Visualizer& source, UINT width, UINT height);
     void ResetEffectSimulation(double time);
+    bool RenderFrame(bool waitForVideoFrame, std::wstring& error);
+    double BackgroundVideoTime(double songTime) const;
     void UpdateActiveNotes();
     void UpdateEffects();
     void SpawnEffect(const MidiNote& note, int ordinal);
@@ -160,6 +180,9 @@ private:
     void SpawnImpactShards(float centerX, int track, std::uint32_t seed);
     void RebuildGeometry(float width, float height);
     void DrawBackground(float width, float height);
+    bool UpdateBackgroundVideoFrame(double seconds, bool waitForFrame, std::wstring& error);
+    bool CreateBackgroundVideoBitmap(const std::vector<std::uint8_t>& pixels, UINT width, UINT height,
+                                     Microsoft::WRL::ComPtr<ID2D1Bitmap>& bitmap);
     void DrawNoteGuides(float width, float height);
     void DrawNotes(float width, float height);
     void DrawKeyboard(float width, float height);
@@ -204,7 +227,18 @@ private:
     Microsoft::WRL::ComPtr<IWICBitmapSource> backgroundSource_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> backgroundBitmap_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> smokeWindowBitmap_;
+    std::uint32_t smokeWindowSeed_ = 0;
     std::wstring backgroundPath_;
+    bool backgroundIsVideo_ = false;
+    bool interactiveSeeking_ = false;
+    // Positive values delay the background video; negative values advance it.
+    int videoOffsetMilliseconds_ = 0;
+    std::unique_ptr<BackgroundVideoDecoder> backgroundVideo_;
+    std::vector<std::uint8_t> backgroundVideoPixels_;
+    UINT backgroundVideoWidth_ = 0;
+    UINT backgroundVideoHeight_ = 0;
+    std::uint64_t backgroundVideoFrameVersion_ = 0;
+    std::uint64_t backgroundBitmapFrameVersion_ = 0;
     float backgroundOpacity_ = kDefaultBackgroundOpacity;
 
     std::vector<D2D1::ColorF> trackColors_;

@@ -1,10 +1,10 @@
-# Piano Visualizer Classic v1.1.0
+# Piano Visualizer Classic v1.2.0
 
-A lightweight piano MIDI visualizer for Windows. MIDI notes fall toward an 88-key keyboard, with configurable visual effects, realtime playback through a lightweight internal synthesizer, and MP4 video rendering through FFmpeg.
+A lightweight piano MIDI visualizer for Windows. MIDI notes fall toward an 88-key keyboard, with configurable visual effects, real-time playback through a lightweight internal synthesizer, and MP4 video rendering through FFmpeg.
 
 ## Screenshots
 
-![Piano Visualizer Classic - Main](screenshots/visualizer.png)
+![Piano Visualizer Classic - Main](https://raw.githubusercontent.com/pirozhki/PianoVisualizerClassic/main/screenshots/visualizer.png)
 
 ## Features
 
@@ -12,26 +12,27 @@ A lightweight piano MIDI visualizer for Windows. MIDI notes fall toward an 88-ke
 * Full 88-key keyboard with velocity-based note and keyboard illumination
 * Track-based note colors and a C4 position label
 * Optional octave guide lines at B-to-C boundaries
-* Background images with adjustable opacity; **Default BG** restores the built-in dark background
+* Background images and videos with adjustable opacity; **Default BG** restores the built-in dark background
+* Background-video sync offset adjustable from −10,000 to +10,000 ms in 1 ms steps; the current value is displayed beside the slider
 * Configurable note fall speed
 * Configurable visual effects:
   * **Wave Line** — aqua/cyan ripple with subtle fading afterimages; brighter when Note Glow is enabled
   * **Octave Guide Lines** — vertical guides at octave boundaries
   * **Smoke Glow** and **Light Cross**
-  * **Smoke Window** — one large, fixed smoke image revealed through translucent falling notes
-  * **White Particles** — independently randomized, slowly moving particles behind notes in the note area only; count adjustable from 0 to 200 (default 40)
+  * **Smoke Window** — a randomized smoke texture generated at initialization and held fixed during playback and rendering
+  * **White Particles** — slowly moving particles behind notes in the note area only, with a softly faded outer edge; count adjustable from 0 to 200 (default 40)
   * **Impact Polygons** — three fixed-size triangular shards per hit, with a short lifetime
   * **Spark**, **Ripple**, **Diamond Ripple**, and **Note Glow**
 * Default enabled effects: **Wave Line**, **Octave Guide Lines**, **Smoke Glow**, and **Light Cross**
-* Realtime MIDI playback using the internal XAudio2 synthesizer; audio can be enabled or disabled independently
+* Real-time MIDI playback using the internal XAudio2 synthesizer; audio can be enabled or disabled independently
 * MP4 video rendering through FFmpeg, with optional audio, progress reporting, and cancellation
-* A 2-second visual-effects tail after the final MIDI event
+* A 3-second visual-effects tail after the final MIDI event
 
 ## Download
 
 For a prebuilt Windows binary, see the [Releases](../../releases) page.
 
-The `PianoVisualizerClassic-v1.1.0-source.zip` archive contains the Visual Studio source project and does not include a prebuilt executable.
+The `PianoVisualizerClassic-v1.2.0-source.zip` archive contains the Visual Studio source project and does not include a prebuilt executable.
 
 ## Requirements
 
@@ -40,7 +41,7 @@ The `PianoVisualizerClassic-v1.1.0-source.zip` archive contains the Visual Studi
 * Windows 10 or later (64-bit)
 * FFmpeg (`ffmpeg.exe`) for MP4 video rendering only
 
-MIDI visualization and realtime playback do not require FFmpeg.
+MIDI visualization and real-time playback do not require FFmpeg.
 
 ### Building
 
@@ -52,49 +53,44 @@ CMake is not required.
 
 ## Running
 
-Run `PianoVisualizerClassic.exe`, then open a Standard MIDI File (`.mid` or `.midi`) from the control window. Adjust playback position, fall speed, background, effects, colors, and audio settings as needed. Several settings can be changed while playback is running.
+Run `PianoVisualizerClassic.exe`, then open a Standard MIDI File (`.mid` or `.midi`) from the control window. Use **Image...** to select a still image, **Video...** to select a background video, or **Default BG** to restore the built-in background. For video backgrounds, use **Video offset** to shift the video relative to the MIDI timeline in 1 ms steps (−10,000 to +10,000 ms); positive values delay the video, while negative values advance it. The signed millisecond value is displayed beside the slider and updates as the slider moves. Adjust playback position, fall speed, background opacity, effects, colors, and audio settings as needed. Several settings can be changed while playback is running.
 
 ## FFmpeg
 
-FFmpeg is required only for MP4 rendering and is **not included** in this repository. Place `ffmpeg.exe` next to `PianoVisualizerClassic.exe` or add its directory to the system `PATH`. The application searches those locations. When FFmpeg is unavailable, realtime visualization and playback remain available; only video rendering is disabled.
+FFmpeg is required only for MP4 rendering and is **not included** in this repository. Place `ffmpeg.exe` next to `PianoVisualizerClassic.exe` or add its directory to the system `PATH`. The application searches those locations. When FFmpeg is unavailable, real-time visualization and playback remain available; only video rendering is disabled.
 
-Video frames are sent directly to FFmpeg as BGRA data, without a temporary image sequence. When audio is included, the application creates a temporary WAV file and FFmpeg combines it with the rendered video.
+Video frames are sent directly to FFmpeg as BGRA data, without a temporary image sequence. When audio is included, the application creates a temporary WAV file and FFmpeg combines it with the rendered video. The soundtrack of the background video is not used; the optional audio track is generated by the internal synthesizer.
 
 ## Video Rendering
 
-Video rendering runs on a worker thread with its own Direct2D/WIC rendering context. Frames are generated from fixed timestamps rather than the realtime UI loop. Rendering options include output width and height, destination file, and whether to include audio. Current visualizer settings—including effects, track colors, background image and opacity, octave guides, particle count, and fall speed—are copied to the render context.
+Video rendering runs on a worker thread with its own Direct2D/WIC rendering context. Frames are generated from fixed timestamps rather than the real-time UI loop, while using the same frame-update and drawing path as the live preview. Rendering options include output width and height, destination file, and whether to include audio. Current visualizer settings—including effects, track colors, background image or video and opacity, video sync offset, octave guides, particle count, and fall speed—are copied to the render context.
 
-## Building
-
-Open `PianoVisualizer.sln` in Visual Studio and build with:
-
-```text
-Configuration: Release
-Platform: x64
-```
-
-The executable is generated at:
-
-```text
-bin\x64\Release\PianoVisualizerClassic.exe
-```
+Video backgrounds are synchronized to the MIDI timeline using the configured offset. If a background video ends before the MIDI and visual tail, its final frame remains displayed for the rest of playback or rendering; it does not loop. Windows Media Foundation decodes the background video, and available formats depend on installed Windows codecs (MP4/H.264 is recommended). The default MP4 output size is 1280×720 at 60 fps.
 
 ## Controls
 
-The control window provides MIDI loading and playback controls, fall speed, background image and opacity controls, the **Default BG** reset button, effect toggles, White Particles count, Wave Line color selection, track colors, audio volume, octave guide lines, and video rendering.
+The control window provides MIDI loading and playback controls, fall speed, separate **Image...** and **Video...** background buttons, background opacity, the **Default BG** reset button, the **Video offset** slider and its live millisecond value, effect toggles, White Particles count, Wave Line color selection, track colors, audio volume, octave guide lines, and video rendering.
 
-## Release Notes — v1.1.0
+## Release Notes — v1.2.0
 
-This release consolidates the improvements made during development:
+* Added background-video support through Windows Media Foundation, synchronized to the MIDI timeline during playback and MP4 rendering.
+* Added a **Video offset** slider with a live signed millisecond readout, adjustable from −10,000 to +10,000 ms in 1 ms steps. Positive values delay the video; negative values advance it.
+* Split background selection into **Image...** and **Video...** buttons and added **Default BG** to restore the built-in background.
+* Improved video seeking and timeline scrubbing to keep the control window responsive. When a background video reaches its end, its final frame remains visible instead of looping.
+* Kept live preview and offline rendering on the same frame-update and drawing path, with render frames evaluated at fixed timestamps. The background video's own soundtrack is ignored when rendering; optional output audio comes from the internal synthesizer.
+* Softened the outer edge of **White Particles** while preserving the established central glow and cross sparkle. Particles remain behind notes and clipped to the note area.
+* Made **Smoke Window** generate a randomized texture during initialization and keep it fixed for playback and rendering.
+* Extended the visual-effects tail after the final MIDI event to 3 seconds and set the default MP4 render size to 1280×720.
+
+## Previous Release — v1.1.0
 
 * Added the configurable aqua Wave Line with reduced amplitude, slower propagation, stronger distance attenuation, subtle afterimages, and stronger glow when Note Glow is enabled. Ripple and Diamond Ripple show expanding outlines without a center flash.
 * Added Smoke Window using one bright, fixed smoke texture; the visible portion changes as translucent notes fall across it, and the loaded background image does not show through the smoke backing.
-* Added deterministic randomized White Particles with per-particle position, speed, size, drift, and twinkle. Particles are clipped to the note area and rendered behind notes. Their count slider ranges from 0 to 200, defaulting to 40, and applies to offline rendering too.
+* Added randomized White Particles with per-particle position, speed, size, drift, and twinkle. Particles are clipped to the note area and rendered behind notes. Their count slider ranges from 0 to 200, defaulting to 40, and applies to offline rendering too.
 * Added Impact Polygons: three shards per hit, all at size 6.0, with no size shrink during their short approximately 0.36–0.50-second lifetime.
 * Set the default enabled effects to Wave Line, Octave Guide Lines, Smoke Glow, and Light Cross. Light Cross particles rise a little higher.
 * Refined Smoke Glow by removing its outline, tightening the blur, and slowing the rise.
 * Brightened the white-key gradient without changing black keys, set background-image opacity to 30% on load, and added a button to restore the built-in background.
-* Extended the visual-effects tail after the final MIDI event to 2 seconds.
 * Added Windows executable version metadata.
 
 ## License

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <utility>
 
 #pragma comment(lib, "windowscodecs.lib")
@@ -64,6 +65,19 @@ float AmbientRandom01(std::uint32_t particleIndex, std::uint32_t channel) {
     return static_cast<float>((h >> 8) & 0x00FFFFFFu) / 16777216.0f;
 }
 
+std::uint32_t CreateSmokeWindowSeed() {
+    // Use a new seed per Visualizer initialization, with a clock-based fallback.
+    std::uint32_t seed = static_cast<std::uint32_t>(GetTickCount64());
+    try {
+        std::random_device randomSource;
+        seed ^= static_cast<std::uint32_t>(randomSource());
+        seed ^= static_cast<std::uint32_t>(randomSource()) * 0x9E3779B9u;
+    } catch (...) {
+        // GetTickCount64 still provides a changing seed if the random source fails.
+    }
+    return seed;
+}
+
 float VelocityOpacity(int velocity) {
     return 0.34f + 0.66f * Velocity01(velocity);
 }
@@ -94,8 +108,12 @@ Visualizer::~Visualizer() {
 }
 
 void Visualizer::Shutdown() {
+    interactiveSeeking_ = false;
     DiscardDeviceResources();
+    ClearBackgroundVideoState();
     backgroundSource_.Reset();
+    backgroundPath_.clear();
+    smokeWindowSeed_ = 0;
     c4LabelFormat_.Reset();
     dwriteFactory_.Reset();
     wicFactory_.Reset();
@@ -114,6 +132,7 @@ void Visualizer::Shutdown() {
 bool Visualizer::Initialize(HWND hwnd) {
     Shutdown();
     hwnd_ = hwnd;
+    smokeWindowSeed_ = CreateSmokeWindowSeed();
 
     if (FAILED(D2D1CreateFactory(
         D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -132,6 +151,9 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     // It copies only immutable/user-facing visual state from the live visualizer;
     // no live D2D/WIC resource is shared across threads.
     Shutdown();
+    // Use the same randomized smoke field as the live preview so offline renders
+    // reproduce its appearance, even though their Direct2D resources are separate.
+    smokeWindowSeed_ = source.smokeWindowSeed_;
 
     hwnd_ = nullptr;
     song_ = source.song_;
@@ -144,7 +166,9 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     showNoteGuides_ = source.showNoteGuides_;
     waveLineColor_ = source.waveLineColor_;
     backgroundPath_ = source.backgroundPath_;
+    backgroundIsVideo_ = source.backgroundIsVideo_;
     backgroundOpacity_ = source.backgroundOpacity_;
+    videoOffsetMilliseconds_ = source.videoOffsetMilliseconds_;
 
     width_ = static_cast<float>(std::max<UINT>(1, width));
     height_ = static_cast<float>(std::max<UINT>(1, height));
@@ -192,8 +216,18 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     if (FAILED(hr)) return false;
 
     if (!CreateDrawingResources()) return false;
-    if (!backgroundPath_.empty() && (!LoadBackgroundSource() || !CreateBackgroundBitmap())) {
-        return false;
+    if (!backgroundPath_.empty()) {
+        if (backgroundIsVideo_) {
+            backgroundVideo_ = std::make_unique<BackgroundVideoDecoder>();
+            std::wstring error;
+            if (!backgroundVideo_->Open(backgroundPath_, error) ||
+                !UpdateBackgroundVideoFrame(BackgroundVideoTime(0.0), true, error)) {
+                ClearBackgroundVideoState();
+                return false;
+            }
+        } else if (!LoadBackgroundSource() || !CreateBackgroundBitmap()) {
+            return false;
+        }
     }
 
     return true;
@@ -228,7 +262,7 @@ bool Visualizer::CreateDeviceResources() {
         return false;
     }
 
-    if (backgroundPath_.empty()) return true;
+    if (backgroundPath_.empty() || backgroundIsVideo_) return true;
     if (!backgroundSource_ && !LoadBackgroundSource()) return true;
     if (FAILED(CreateBackgroundBitmap())) backgroundBitmap_.Reset();
     return true;
@@ -400,11 +434,11 @@ bool Visualizer::CreateSmokeWindowBitmap() {
     if (smokeWindowBitmap_) return true;
     if (!target_ || !wicFactory_) return false;
 
-    // One fixed, large smoke image for the entire canvas.  Drawing it at the
-    // same canvas coordinates through each moving note makes the revealed
-    // portion change naturally as the note travels downward.
+    // Generate the texture from this Visualizer's seed. The seed is selected
+    // once at initialization and retained if Direct2D resources are recreated.
     constexpr UINT textureWidth = 1024;
     constexpr UINT textureHeight = 576;
+    const std::uint32_t textureSeed = smokeWindowSeed_;
     ComPtr<IWICBitmap> wicBitmap;
     HRESULT hr = wicFactory_->CreateBitmap(
         textureWidth, textureHeight, GUID_WICPixelFormat32bppPBGRA,
@@ -429,11 +463,15 @@ bool Visualizer::CreateSmokeWindowBitmap() {
         t = std::clamp(t, 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
     };
-    const auto lattice = [](int x, int y) {
+    const auto lattice = [textureSeed](int x, int y) {
         std::uint32_t h = static_cast<std::uint32_t>(x) * 0x8DA6B343u ^
-                          static_cast<std::uint32_t>(y) * 0xD8163841u ^ 0xCB1AB31Fu;
-        h ^= h >> 13;
-        h *= 0x85EBCA6Bu;
+                          static_cast<std::uint32_t>(y) * 0xD8163841u ^ textureSeed;
+        // Avalanche the coordinates and per-texture seed together so each
+        // initialization produces a different coherent noise field.
+        h ^= h >> 16;
+        h *= 0x7FEB352Du;
+        h ^= h >> 15;
+        h *= 0x846CA68Bu;
         h ^= h >> 16;
         return static_cast<float>(h & 0x00FFFFFFu) / 16777215.0f;
     };
@@ -494,6 +532,7 @@ bool Visualizer::CreateSmokeWindowBitmap() {
 
 void Visualizer::DiscardDeviceResources() {
     backgroundBitmap_.Reset();
+    backgroundBitmapFrameVersion_ = 0;
     smokeWindowBitmap_.Reset();
     beamBrushes_.clear();
     activeBlackBrushes_.clear();
@@ -611,7 +650,7 @@ void Visualizer::SetTime(double seconds) {
     // Permit a short visual-only outro after the MIDI end. Normal seeking and
     // the playback slider remain bounded by Duration(); the app advances this
     // extra interval only to let transient effects finish fading out.
-    double clamped = std::clamp(seconds, -2.0, song_->duration + 2.0);
+    double clamped = std::clamp(seconds, -2.0, song_->duration + 3.0);
     if (!effectInitialized_ || std::abs(clamped - currentTime_) > 0.20) {
         ResetEffectSimulation(clamped - 0.001);
     }
@@ -712,25 +751,91 @@ bool Visualizer::LoadBackgroundSource() {
 }
 
 bool Visualizer::LoadBackgroundImage(const std::wstring& path) {
-    if (path.empty()) return false;
+    if (path.empty() || !wicFactory_) return false;
 
+    // Load to temporary WIC/D2D resources first. If the file is invalid, keep
+    // the currently active background instead of clearing it prematurely.
+    ComPtr<IWICBitmapDecoder> decoder;
+    HRESULT hr = wicFactory_->CreateDecoderFromFilename(
+        path.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, decoder.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    hr = decoder->GetFrame(0, frame.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICFormatConverter> converter;
+    hr = wicFactory_->CreateFormatConverter(converter.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return false;
+
+    hr = converter->Initialize(
+        frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone, nullptr, 0.0,
+        WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) return false;
+
+    ComPtr<ID2D1Bitmap> newBitmap;
+    if (target_) {
+        hr = target_->CreateBitmapFromWicBitmap(
+            converter.Get(), nullptr, newBitmap.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) return false;
+    }
+
+    // Stop and join the old video's decoder before committing the new image.
+    // This also clears all cached video-frame state so it cannot leak into a
+    // later video selection.
+    ClearBackgroundVideoState();
     backgroundPath_ = path;
-    backgroundSource_.Reset();
-    backgroundBitmap_.Reset();
-
-    if (!LoadBackgroundSource()) {
-        backgroundPath_.clear();
-        return false;
-    }
-
-    if (target_ && FAILED(CreateBackgroundBitmap())) {
-        backgroundSource_.Reset();
-        backgroundPath_.clear();
-        return false;
-    }
-
-    // Each newly loaded background starts at the requested default opacity.
+    backgroundSource_ = converter;
+    backgroundBitmap_ = newBitmap;
     backgroundOpacity_ = kDefaultBackgroundOpacity;
+    videoOffsetMilliseconds_ = 0;
+    return true;
+}
+
+bool Visualizer::LoadBackgroundVideo(const std::wstring& path, std::wstring& error) {
+    if (path.empty() || !target_) {
+        error = L"The visualizer is not ready to load a video background.";
+        return false;
+    }
+
+    auto decoder = std::make_unique<BackgroundVideoDecoder>();
+    if (!decoder->Open(path, error)) return false;
+
+    std::vector<std::uint8_t> pixels;
+    UINT videoWidth = 0;
+    UINT videoHeight = 0;
+    std::uint64_t frameVersion = 0;
+    bool changed = false;
+    if (!decoder->GetFrameAtTime(0.0, true, pixels, videoWidth, videoHeight,
+                                 frameVersion, changed, error) ||
+        pixels.empty() || videoWidth == 0 || videoHeight == 0) {
+        if (error.empty()) error = L"The video did not produce a usable first frame.";
+        return false;
+    }
+
+    ComPtr<ID2D1Bitmap> newBitmap;
+    if (!CreateBackgroundVideoBitmap(pixels, videoWidth, videoHeight, newBitmap)) {
+        error = L"Direct2D could not create a bitmap from the decoded video frame.";
+        return false;
+    }
+
+    // Commit only after the new video and its first frame are ready. The
+    // previous image/video stays intact if opening or decoding failed.
+    ClearBackgroundVideoState();
+    backgroundSource_.Reset();
+    backgroundVideo_ = std::move(decoder);
+    backgroundVideoPixels_ = std::move(pixels);
+    backgroundVideoWidth_ = videoWidth;
+    backgroundVideoHeight_ = videoHeight;
+    backgroundVideoFrameVersion_ = frameVersion;
+    backgroundBitmapFrameVersion_ = frameVersion;
+    backgroundIsVideo_ = true;
+    backgroundPath_ = path;
+    backgroundBitmap_ = newBitmap;
+    backgroundOpacity_ = kDefaultBackgroundOpacity;
+    videoOffsetMilliseconds_ = 0;
     return true;
 }
 
@@ -738,15 +843,81 @@ void Visualizer::ResetBackgroundImage() {
     // Revert to DrawBackground's built-in dark default background.
     backgroundBitmap_.Reset();
     backgroundSource_.Reset();
+    ClearBackgroundVideoState();
     backgroundPath_.clear();
     backgroundOpacity_ = kDefaultBackgroundOpacity;
+    videoOffsetMilliseconds_ = 0;
+}
+
+void Visualizer::ClearBackgroundVideoState() {
+    // Resetting the unique_ptr stops the decoder worker and joins its thread.
+    // Clear every CPU-side cache/version as well; otherwise switching back to
+    // a video or recreating Direct2D resources could mistake an old frame for
+    // one from the newly selected file.
+    backgroundVideo_.reset();
+    backgroundVideoPixels_.clear();
+    backgroundVideoWidth_ = 0;
+    backgroundVideoHeight_ = 0;
+    backgroundVideoFrameVersion_ = 0;
+    backgroundBitmapFrameVersion_ = 0;
+    backgroundIsVideo_ = false;
+    interactiveSeeking_ = false;
 }
 
 bool Visualizer::CreateBackgroundBitmap() {
     if (!target_ || !backgroundSource_) return false;
     backgroundBitmap_.Reset();
+    backgroundBitmapFrameVersion_ = 0;
     return SUCCEEDED(target_->CreateBitmapFromWicBitmap(
         backgroundSource_.Get(), nullptr, backgroundBitmap_.ReleaseAndGetAddressOf()));
+}
+
+bool Visualizer::CreateBackgroundVideoBitmap(
+    const std::vector<std::uint8_t>& pixels, UINT width, UINT height,
+    ComPtr<ID2D1Bitmap>& bitmap) {
+    if (!target_ || pixels.empty() || width == 0 || height == 0) return false;
+    const std::size_t required = static_cast<std::size_t>(width) * height * 4u;
+    if (pixels.size() < required) return false;
+    const auto properties = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    return SUCCEEDED(target_->CreateBitmap(
+        D2D1::SizeU(width, height), pixels.data(), width * 4u,
+        properties, bitmap.ReleaseAndGetAddressOf()));
+}
+
+double Visualizer::BackgroundVideoTime(double songTime) const {
+    // A positive offset delays the background video relative to MIDI time.
+    // Negative values seek farther into the video at the same MIDI timestamp.
+    return std::max(0.0, songTime - static_cast<double>(videoOffsetMilliseconds_) / 1000.0);
+}
+
+bool Visualizer::UpdateBackgroundVideoFrame(double seconds, bool waitForFrame,
+                                            std::wstring& error) {
+    if (!backgroundIsVideo_ || !backgroundVideo_) return true;
+
+    bool changed = false;
+    if (!backgroundVideo_->GetFrameAtTime(
+            seconds, waitForFrame, backgroundVideoPixels_, backgroundVideoWidth_,
+            backgroundVideoHeight_, backgroundVideoFrameVersion_, changed, error)) {
+        return false;
+    }
+
+    // Re-create the D2D bitmap after either a new decoded frame or device loss.
+    // The decoder keeps CPU-side pixels, so device resources can be rebuilt
+    // without touching or sharing the decoder's thread-affine resources.
+    if (backgroundVideoFrameVersion_ != 0 && !backgroundVideoPixels_.empty() &&
+        backgroundBitmapFrameVersion_ != backgroundVideoFrameVersion_) {
+        ComPtr<ID2D1Bitmap> newBitmap;
+        if (!CreateBackgroundVideoBitmap(backgroundVideoPixels_, backgroundVideoWidth_,
+                                         backgroundVideoHeight_, newBitmap)) {
+            error = L"Direct2D could not update the video background bitmap.";
+            return false;
+        }
+        backgroundBitmap_ = newBitmap;
+        backgroundBitmapFrameVersion_ = backgroundVideoFrameVersion_;
+    }
+    return true;
 }
 
 void Visualizer::SetBackgroundOpacity(float opacity) {
@@ -1664,10 +1835,32 @@ void Visualizer::DrawAmbientParticles(float width, float height) {
         if (y < 0.0f) y += particleAreaHeight;
 
         const float twinkle = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(time * twinkleRate + phase));
-        white_->SetOpacity(0.17f * twinkle);
-        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), size * 3.8f, size * 3.8f), white_.Get());
+        const D2D1_POINT_2F center = D2D1::Point2F(x, y);
+
+        // Add a very subtle, wider halo to diffuse the particle just a little
+        // more. The bright center and cross sparkle below retain their original
+        // size and opacity; the combined halo opacity inside the old 3.8x radius
+        // remains exactly 0.17 * twinkle.
+        constexpr float haloRadii[] = {5.25f, 5.0f, 4.7f, 4.4f, 4.1f, 3.9f};
+        constexpr float haloLayerOpacities[] = {0.008f, 0.015f, 0.020f, 0.025f, 0.035f, 0.012f};
+        float remainingTransparency = 1.0f;
+        for (int layer = 0; layer < 6; ++layer) {
+            const float layerOpacity = haloLayerOpacities[layer] * twinkle;
+            remainingTransparency *= (1.0f - layerOpacity);
+            white_->SetOpacity(layerOpacity);
+            const float radius = size * haloRadii[layer];
+            target_->FillEllipse(D2D1::Ellipse(center, radius, radius), white_.Get());
+        }
+        const float targetHaloOpacity = 0.17f * twinkle;
+        const float innerHaloOpacity = std::clamp(
+            1.0f - (1.0f - targetHaloOpacity) / remainingTransparency, 0.0f, 1.0f);
+        white_->SetOpacity(innerHaloOpacity);
+        target_->FillEllipse(
+            D2D1::Ellipse(center, size * 3.8f, size * 3.8f), white_.Get());
+
+        // Preserve the original bright center exactly as before.
         white_->SetOpacity(0.84f * twinkle);
-        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), size, size), white_.Get());
+        target_->FillEllipse(D2D1::Ellipse(center, size, size), white_.Get());
         if (size > 1.9f) {
             white_->SetOpacity(0.30f * twinkle);
             target_->DrawLine(D2D1::Point2F(x - size * 2.3f, y),
@@ -1802,6 +1995,51 @@ void Visualizer::DrawKeyboard(float width, float height) {
     black_->SetOpacity(1.0f);
 }
 
+bool Visualizer::RenderFrame(bool waitForVideoFrame, std::wstring& error) {
+    if (!target_) {
+        error = L"The renderer is not initialized.";
+        return false;
+    }
+
+    bool backgroundOk = true;
+    if (backgroundIsVideo_ &&
+        !UpdateBackgroundVideoFrame(
+            BackgroundVideoTime(currentTime_), waitForVideoFrame, error)) {
+        // Keep drawing with the last decoded background frame in the live
+        // preview. Offline rendering treats the returned failure as fatal so
+        // it never silently exports a frame with the wrong video timestamp.
+        if (error.empty()) error = L"Failed to update the background video frame.";
+        backgroundOk = false;
+    }
+
+    UpdateActiveNotes();
+    UpdateEffects();
+
+    target_->BeginDraw();
+    DrawBackground(width_, height_);
+    // White Particles are a background layer in both the live preview and
+    // offline renders, so draw them before the guides and MIDI notes.
+    if (IsEffectEnabled(EffectAmbientParticles)) {
+        DrawAmbientParticles(width_, height_);
+    }
+    DrawNoteGuides(width_, height_);
+    DrawNotes(width_, height_);
+    DrawKeyboard(width_, height_);
+    DrawEffects(width_, height_);
+
+    const HRESULT hr = target_->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        DiscardDeviceResources();
+        error = L"Direct2D needs to recreate the rendering target.";
+        return false;
+    }
+    if (FAILED(hr)) {
+        error = L"Direct2D failed while drawing a frame.";
+        return false;
+    }
+    return backgroundOk;
+}
+
 void Visualizer::Render() {
     if (!hwnd_ || !CreateDeviceResources()) return;
 
@@ -1809,26 +2047,14 @@ void Visualizer::Render() {
     GetClientRect(hwnd_, &rc);
     const LONG clientW = std::max<LONG>(1, rc.right - rc.left);
     const LONG clientH = std::max<LONG>(1, rc.bottom - rc.top);
-    const float w = static_cast<float>(clientW);
-    const float h = static_cast<float>(clientH);
 
-    if (std::abs(w - width_) > 0.5f || std::abs(h - height_) > 0.5f) {
+    if (std::abs(static_cast<float>(clientW) - width_) > 0.5f ||
+        std::abs(static_cast<float>(clientH) - height_) > 0.5f) {
         Resize(static_cast<UINT>(clientW), static_cast<UINT>(clientH));
     }
 
-    UpdateActiveNotes();
-    UpdateEffects();
-
-    target_->BeginDraw();
-    DrawBackground(w, h);
-    // Ambient White Particles form a background layer: draw them before guides
-    // and notes so they are visible through the note area but never over notes.
-    if (IsEffectEnabled(EffectAmbientParticles)) DrawAmbientParticles(w, h);
-    DrawNoteGuides(w, h);
-    DrawNotes(w, h);
-    DrawKeyboard(w, h);
-    DrawEffects(w, h);
-
-    const HRESULT hr = target_->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) DiscardDeviceResources();
+    std::wstring ignoredError;
+    // Pause/seek preview waits for the requested timestamp; continuous playback
+    // remains asynchronous so video decoding cannot stall the UI thread.
+    RenderFrame(!playing_ && !interactiveSeeking_, ignoredError);
 }

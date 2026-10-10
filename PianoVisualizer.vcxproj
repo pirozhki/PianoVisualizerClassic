@@ -55,7 +55,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwrite.lib;xaudio2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwrite.lib;xaudio2.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -69,13 +69,14 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwrite.lib;xaudio2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwrite.lib;xaudio2.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="src\MidiFile.h" />
+    <ClInclude Include="src\BackgroundVideoDecoder.h" />
     <ClInclude Include="src\Visualizer.h" />
     <ClInclude Include="src\SimpleSynth.h" />
     <ClInclude Include="src\VideoRenderer.h" />
@@ -83,6 +84,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\MidiFile.cpp" />
+    <ClCompile Include="src\BackgroundVideoDecoder.cpp" />
     <ClCompile Include="src\Visualizer.cpp" />
     <ClCompile Include="src\SimpleSynth.cpp" />
     <ClCompile Include="src\VideoRenderer.cpp" />

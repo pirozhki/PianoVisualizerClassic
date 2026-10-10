@@ -65,6 +65,13 @@ std::wstring FormatTime(double seconds) {
     return buf;
 }
 
+std::wstring FormatVideoOffset(int milliseconds) {
+    std::wstring result = milliseconds > 0 ? L"+" : L"";
+    result += std::to_wstring(milliseconds);
+    result += L" ms";
+    return result;
+}
+
 void SetControlText(int id, const std::wstring& text) {
     if (!g_controlHwnd) return;
     HWND control = GetDlgItem(g_controlHwnd, id);
@@ -279,7 +286,7 @@ void UpdateControlUi() {
         SendDlgItemMessageW(g_controlHwnd, IDC_VOLUME_SLIDER, TBM_SETPOS, TRUE, volume);
     }
 
-    if (g_visualizer.HasBackgroundImage()) {
+    if (g_visualizer.HasBackground()) {
         const int opacity = static_cast<int>(g_visualizer.BackgroundOpacity() * 100.0f + 0.5f);
         SetControlText(IDC_LABEL_BG_OPACITY, std::to_wstring(opacity) + L"%");
         EnableWindow(GetDlgItem(g_controlHwnd, IDC_BG_OPACITY_SLIDER), TRUE);
@@ -290,7 +297,15 @@ void UpdateControlUi() {
         SendDlgItemMessageW(g_controlHwnd, IDC_BG_OPACITY_SLIDER, TBM_SETPOS, TRUE, 0);
     }
     EnableWindow(GetDlgItem(g_controlHwnd, IDC_BTN_BACKGROUND_RESET),
-                  g_visualizer.HasBackgroundImage() ? TRUE : FALSE);
+                  g_visualizer.HasBackground() ? TRUE : FALSE);
+
+    const bool hasBackgroundVideo = g_visualizer.HasBackgroundVideo();
+    EnableWindow(GetDlgItem(g_controlHwnd, IDC_VIDEO_OFFSET_SLIDER),
+                 hasBackgroundVideo ? TRUE : FALSE);
+    SendDlgItemMessageW(g_controlHwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETPOS, TRUE,
+                        g_visualizer.VideoOffsetMilliseconds());
+    SetControlText(IDC_LABEL_VIDEO_OFFSET, hasBackgroundVideo
+        ? FormatVideoOffset(g_visualizer.VideoOffsetMilliseconds()) : L"N/A");
 
     const bool hasSong = duration > 0.0;
     auto setEnabledIfChanged = [&](int id, bool enabled) {
@@ -347,7 +362,32 @@ bool CreateTempWavPath(std::wstring& path) {
     return true;
 }
 
-void OpenBackground(HWND owner) {
+void CommitBackgroundSelection(HWND owner, const wchar_t* path, bool video) {
+    bool loaded = false;
+    std::wstring error;
+    if (video) {
+        loaded = g_visualizer.LoadBackgroundVideo(path, error);
+    } else {
+        loaded = g_visualizer.LoadBackgroundImage(path);
+    }
+    if (!loaded) {
+        const wchar_t* message = video
+            ? L"Failed to load the background video. MP4/H.264 is recommended; supported formats depend on the codecs installed in Windows."
+            : L"Failed to load the background image.";
+        if (!error.empty()) {
+            std::wstring detailed = std::wstring(message) + L"\n\n" + error;
+            MessageBoxW(owner, detailed.c_str(), L"Piano Visualizer Classic", MB_ICONERROR);
+        } else {
+            MessageBoxW(owner, message, L"Piano Visualizer Classic", MB_ICONERROR);
+        }
+        return;
+    }
+    SetControlText(IDC_LABEL_BACKGROUND, BaseName(path));
+    UpdateControlUi();
+    InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+}
+
+void OpenBackgroundImage(HWND owner) {
     wchar_t path[MAX_PATH]{};
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -357,14 +397,20 @@ void OpenBackground(HWND owner) {
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (!GetOpenFileNameW(&ofn)) return;
+    CommitBackgroundSelection(owner, path, false);
+}
 
-    if (!g_visualizer.LoadBackgroundImage(path)) {
-        MessageBoxW(owner, L"Failed to load the background image.", L"Piano Visualizer Classic", MB_ICONERROR);
-        return;
-    }
-    SetControlText(IDC_LABEL_BACKGROUND, BaseName(path));
-    UpdateControlUi();
-    InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+void OpenBackgroundVideo(HWND owner) {
+    wchar_t path[MAX_PATH]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Video Files\0*.mp4;*.m4v;*.mov;*.wmv;*.avi;*.mkv;*.mpg;*.mpeg\0All Files\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&ofn)) return;
+    CommitBackgroundSelection(owner, path, true);
 }
 
 void ResetBackground(HWND owner) {
@@ -653,8 +699,8 @@ INT_PTR CALLBACK RenderDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     (void)lp;
     switch (msg) {
     case WM_INITDIALOG: {
-        SetDlgItemInt(hwnd, IDC_RENDER_WIDTH, 1920, FALSE);
-        SetDlgItemInt(hwnd, IDC_RENDER_HEIGHT, 1080, FALSE);
+        SetDlgItemInt(hwnd, IDC_RENDER_WIDTH, 1280, FALSE);
+        SetDlgItemInt(hwnd, IDC_RENDER_HEIGHT, 720, FALSE);
         std::wstring ffmpegPath;
         const bool ffmpegAvailable = VideoRenderer::FindFfmpeg(ffmpegPath);
         const bool audioAvailable = g_simpleSynth.IsAvailable();
@@ -805,6 +851,15 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendDlgItemMessageW(hwnd, IDC_BG_OPACITY_SLIDER, TBM_SETPOS, TRUE,
                             static_cast<LPARAM>(g_visualizer.BackgroundOpacity() * 100.0f + 0.5f));
 
+        SendDlgItemMessageW(hwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETRANGE, TRUE,
+                            MAKELONG(Visualizer::kMinVideoOffsetMilliseconds,
+                                     Visualizer::kMaxVideoOffsetMilliseconds));
+        SendDlgItemMessageW(hwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETLINESIZE, 0, 1);
+        SendDlgItemMessageW(hwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETPAGESIZE, 0, 100);
+        SendDlgItemMessageW(hwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETTICFREQ, 1000, 0);
+        SendDlgItemMessageW(hwnd, IDC_VIDEO_OFFSET_SLIDER, TBM_SETPOS, TRUE, 0);
+        SetControlText(IDC_LABEL_VIDEO_OFFSET, L"N/A");
+
         SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
         SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETPAGESIZE, 0, 10);
         SendDlgItemMessageW(hwnd, IDC_AMBIENT_PARTICLES_SLIDER, TBM_SETTICFREQ, 25, 0);
@@ -837,6 +892,7 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_TRACK_COLOR), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_TRACK_RESET), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BG_OPACITY_SLIDER), FALSE);
+        EnableWindow(GetDlgItem(hwnd, IDC_VIDEO_OFFSET_SLIDER), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_BACKGROUND_RESET), FALSE);
         SendDlgItemMessageW(hwnd, IDC_ENABLE_AUDIO, BM_SETCHECK, BST_CHECKED, 0);
         UpdateControlUi();
@@ -863,6 +919,13 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
             return TRUE;
         }
+        if (control == GetDlgItem(hwnd, IDC_VIDEO_OFFSET_SLIDER)) {
+            const int offset = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
+            g_visualizer.SetVideoOffsetMilliseconds(offset);
+            SetControlText(IDC_LABEL_VIDEO_OFFSET, FormatVideoOffset(offset));
+            InvalidateRect(g_visualizerHwnd, nullptr, FALSE);
+            return TRUE;
+        }
         if (control == GetDlgItem(hwnd, IDC_AMBIENT_PARTICLES_SLIDER)) {
             const int count = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
             g_visualizer.SetAmbientParticleCount(count);
@@ -882,6 +945,7 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!g_positionDragging) {
                 g_effectTailRunning = false;
                 g_positionDragging = true;
+                g_visualizer.SetInteractiveSeeking(true);
                 g_resumeAfterSeek = g_playing;
                 if (g_resumeAfterSeek) StopAudioPlayback();
             }
@@ -895,6 +959,7 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == TB_THUMBPOSITION || wp == TB_ENDTRACK) {
                 const bool resume = g_resumeAfterSeek;
                 g_positionDragging = false;
+                g_visualizer.SetInteractiveSeeking(false);
                 g_resumeAfterSeek = false;
                 if (resume) {
                     g_playing = true;
@@ -914,8 +979,11 @@ INT_PTR CALLBACK ControlDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BTN_OPEN:
             OpenMidi(hwnd);
             return TRUE;
-        case IDC_BTN_BACKGROUND:
-            OpenBackground(hwnd);
+        case IDC_BTN_BACKGROUND_IMAGE:
+            OpenBackgroundImage(hwnd);
+            return TRUE;
+        case IDC_BTN_BACKGROUND_VIDEO:
+            OpenBackgroundVideo(hwnd);
             return TRUE;
         case IDC_BTN_BACKGROUND_RESET:
             ResetBackground(hwnd);

@@ -252,24 +252,12 @@ bool VideoRenderer::RenderMp4(const Visualizer& visualizer,
 
         const double time = static_cast<double>(frame) / options.fps;
         renderVisualizer.currentTime_ = std::min(time, renderDuration);
-        renderVisualizer.UpdateActiveNotes();
-        renderVisualizer.UpdateEffects();
-
-        renderVisualizer.target_->BeginDraw();
-        renderVisualizer.DrawBackground(renderVisualizer.width_, renderVisualizer.height_);
-        // Keep White Particles behind notes in offline frames as in realtime.
-        if (renderVisualizer.IsEffectEnabled(Visualizer::EffectAmbientParticles)) {
-            renderVisualizer.DrawAmbientParticles(renderVisualizer.width_, renderVisualizer.height_);
-        }
-        renderVisualizer.DrawNoteGuides(renderVisualizer.width_, renderVisualizer.height_);
-        renderVisualizer.DrawNotes(renderVisualizer.width_, renderVisualizer.height_);
-        renderVisualizer.DrawKeyboard(renderVisualizer.width_, renderVisualizer.height_);
-        renderVisualizer.DrawEffects(renderVisualizer.width_, renderVisualizer.height_);
-        const HRESULT drawHr = renderVisualizer.target_->EndDraw();
-
-        if (FAILED(drawHr)) {
+        std::wstring frameError;
+        if (!renderVisualizer.RenderFrame(true, frameError)) {
             writeOk = false;
-            error = L"Direct2D failed while rendering a video frame.";
+            error = frameError.empty()
+                ? L"Failed while rendering a video frame."
+                : frameError;
             break;
         }
 
