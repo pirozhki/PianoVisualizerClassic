@@ -1,11 +1,11 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include "resource.h"
 
 IDI_PIANOVISUALIZER ICON "PianoVisualizer.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,2,0,0
-PRODUCTVERSION 1,2,0,0
+FILEVERSION 1,3,0,0
+PRODUCTVERSION 1,3,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -18,11 +18,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Pirozhki\0"
             VALUE "FileDescription", "Piano Visualizer Classic\0"
-            VALUE "FileVersion", "1.2.0\0"
+            VALUE "FileVersion", "1.3.0\0"
             VALUE "InternalName", "PianoVisualizerClassic\0"
             VALUE "OriginalFilename", "PianoVisualizerClassic.exe\0"
             VALUE "ProductName", "Piano Visualizer Classic\0"
-            VALUE "ProductVersion", "1.2.0\0"
+            VALUE "ProductVersion", "1.3.0\0"
         END
     END
     BLOCK "VarFileInfo"
@@ -31,7 +31,7 @@ BEGIN
     END
 END
 
-IDD_CONTROL_DIALOG DIALOGEX 0, 0, 430, 532
+IDD_CONTROL_DIALOG DIALOGEX 0, 0, 430, 420
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 EXSTYLE WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW
 CAPTION "Piano Visualizer Classic Control"
@@ -44,6 +44,8 @@ BEGIN
     PUSHBUTTON      "Play", IDC_BTN_PLAY,                    104, 30, 52, 24
     PUSHBUTTON      "Restart", IDC_BTN_RESTART,              162, 30, 60, 24
     PUSHBUTTON      "Render Video...", IDC_BTN_RENDER,       232, 30, 94, 24
+    LTEXT           "Tail (ms)", -1,                            332, 36, 38, 12
+    EDITTEXT        IDC_EDIT_TAIL_MS,                              371, 31, 47, 20, ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP
 
     LTEXT           "Status", -1,                           12, 64, 40, 12
     LTEXT           "No MIDI", IDC_LABEL_STATUS,             58, 64, 320, 12, SS_LEFTNOWORDWRAP
@@ -56,53 +58,76 @@ BEGIN
     CONTROL         "", IDC_SPEED_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | TBS_ENABLESELRANGE | WS_TABSTOP, 70, 108, 248, 24
     LTEXT           "380 px/s", IDC_LABEL_SPEED,             324, 113, 78, 12, SS_RIGHT
 
-    LTEXT           "Background", -1,                       12, 141, 62, 12
-    PUSHBUTTON      "Image...", IDC_BTN_BACKGROUND_IMAGE,             78, 136, 66, 22
-    PUSHBUTTON      "Video...", IDC_BTN_BACKGROUND_VIDEO,       148, 136, 66, 22
-    PUSHBUTTON      "Default BG", IDC_BTN_BACKGROUND_RESET,     218, 136, 70, 22
-    LTEXT           "(No background)", IDC_LABEL_BACKGROUND,     294, 141, 116, 12, SS_LEFTNOWORDWRAP
+    CONTROL         "", IDC_SETTINGS_TAB, "SysTabControl32", WS_TABSTOP, 4, 139, 422, 273
 
-    LTEXT           "Opacity", -1,                          12, 168, 46, 12
-    CONTROL         "", IDC_BG_OPACITY_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 60, 162, 258, 24
-    LTEXT           "30%", IDC_LABEL_BG_OPACITY,             324, 168, 78, 12, SS_RIGHT
+    // Background page. The image is the base layer and the video is composited
+    // over it. Their opacity controls are independent.
+    PUSHBUTTON      "Image...", IDC_BTN_BACKGROUND_IMAGE,             12, 177, 66, 22
+    LTEXT           "(No image)", IDC_LABEL_BACKGROUND,                 86, 182, 322, 12, SS_LEFTNOWORDWRAP
+    PUSHBUTTON      "Video...", IDC_BTN_BACKGROUND_VIDEO,             12, 207, 66, 22
+    LTEXT           "(No video)", IDC_LABEL_BACKGROUND_VIDEO,           86, 212, 322, 12, SS_LEFTNOWORDWRAP
+    PUSHBUTTON      "Default BG", IDC_BTN_BACKGROUND_RESET,            12, 237, 76, 22
 
-    LTEXT           "Video offset", -1,                       12, 196, 64, 12
-    CONTROL         "", IDC_VIDEO_OFFSET_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 80, 190, 238, 24
-    LTEXT           "+0 ms", IDC_LABEL_VIDEO_OFFSET,            324, 196, 78, 12, SS_RIGHT
+    LTEXT           "Image opacity", IDC_LABEL_OPACITY,                98, 242, 74, 12
+    CONTROL         "", IDC_BG_OPACITY_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 178, 235, 170, 24
+    LTEXT           "30%", IDC_LABEL_BG_OPACITY,                      352, 242, 56, 12, SS_RIGHT
 
-    LTEXT           "Effect", -1,                           12, 226, 46, 12
-    AUTOCHECKBOX    "Smoke Glow", IDC_EFFECT_SMOKE,            60, 238, 90, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Spark", IDC_EFFECT_SPARK,                 60, 256, 78, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Note Glow", IDC_EFFECT_NOTE_GLOW,         60, 274, 90, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Smoke Window", IDC_EFFECT_SMOKE_WINDOW,    60, 292, 105, 16, WS_TABSTOP
-    AUTOCHECKBOX    "White Particles", IDC_EFFECT_AMBIENT_PARTICLES, 60, 310, 104, 16, WS_TABSTOP
+    LTEXT           "Video opacity", IDC_LABEL_VIDEO_OPACITY_SECTION,  12, 271, 74, 12
+    CONTROL         "", IDC_VIDEO_OPACITY_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 88, 264, 260, 24
+    LTEXT           "30%", IDC_LABEL_VIDEO_OPACITY,                   352, 271, 56, 12, SS_RIGHT
 
-    AUTOCHECKBOX    "Ripple", IDC_EFFECT_RIPPLE,               170, 238, 78, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Diamond Ripple", IDC_EFFECT_DIAMOND_RIPPLE, 170, 256, 110, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Light Cross", IDC_EFFECT_CROSS_SPARK,    170, 274, 90, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Wave Line", IDC_EFFECT_WAVE_LINE,          170, 292, 90, 16, WS_TABSTOP
-    PUSHBUTTON      "Line Color...", IDC_BTN_WAVE_COLOR,       276, 289, 96, 22
-    AUTOCHECKBOX    "Impact Polygons", IDC_EFFECT_IMPACT_POLYGONS, 170, 310, 102, 16, WS_TABSTOP
-    AUTOCHECKBOX    "Octave Guide Lines", IDC_NOTE_GUIDES,      276, 310, 135, 16, WS_TABSTOP
+    LTEXT           "Video offset", IDC_LABEL_VIDEO_OFFSET_SECTION,    12, 300, 64, 12
+    CONTROL         "", IDC_VIDEO_OFFSET_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 80, 293, 268, 24
+    LTEXT           "+0 ms", IDC_LABEL_VIDEO_OFFSET,                   352, 300, 56, 12, SS_RIGHT
 
-    LTEXT           "White particle count", -1,                  12, 333, 95, 12
-    CONTROL         "", IDC_AMBIENT_PARTICLES_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 108, 326, 210, 24
-    LTEXT           "40", IDC_LABEL_AMBIENT_PARTICLES,         324, 333, 78, 12, SS_RIGHT
+    // Effects and track-color page
+    AUTOCHECKBOX    "Smoke Glow", IDC_EFFECT_SMOKE,                   12, 178, 110, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Water Droplets", IDC_EFFECT_WATER_DROPLETS,                        12, 196, 120, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Note Glow", IDC_EFFECT_NOTE_GLOW,                12, 214, 90, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Smoke Window", IDC_EFFECT_SMOKE_WINDOW,          12, 232, 120, 16, WS_TABSTOP
+    AUTOCHECKBOX    "White Particles", IDC_EFFECT_AMBIENT_PARTICLES,  12, 250, 120, 16, WS_TABSTOP
 
-    LTEXT           "Track color", -1,                       12, 372, 62, 12
-    CONTROL         "", IDC_TRACK_COMBO, "COMBOBOX", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 78, 367, 190, 76
-    PUSHBUTTON      "Choose Color...", IDC_BTN_TRACK_COLOR,  276, 366, 96, 22
-    PUSHBUTTON      "Reset All", IDC_BTN_TRACK_RESET,       276, 393, 96, 22
-    LTEXT           "Track palette", IDC_LABEL_TRACK_COLOR,  78, 397, 190, 12, SS_LEFTNOWORDWRAP
+    AUTOCHECKBOX    "Ripple", IDC_EFFECT_RIPPLE,                     150, 178, 78, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Diamond Ripple", IDC_EFFECT_DIAMOND_RIPPLE,     150, 196, 110, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Keybed Glow", IDC_EFFECT_KEYBED_GLOW,           276, 250, 125, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Light Cross", IDC_EFFECT_CROSS_SPARK,           150, 214, 90, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Wave Line", IDC_EFFECT_WAVE_LINE,               150, 232, 78, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Wave Line Glow", IDC_WAVE_LINE_GLOW,            232, 232, 120, 16, WS_TABSTOP
+    PUSHBUTTON      "Line Color...", IDC_BTN_WAVE_COLOR,              276, 207, 96, 22
+    AUTOCHECKBOX    "Impact Polygons", IDC_EFFECT_IMPACT_POLYGONS,   150, 250, 112, 16, WS_TABSTOP
+    AUTOCHECKBOX    "Octave Guide Lines", IDC_NOTE_GUIDES,            276, 178, 135, 16, WS_TABSTOP
 
-    LTEXT           "Audio", -1,                            12, 427, 42, 12
-    AUTOCHECKBOX    "Enable sound during playback", IDC_ENABLE_AUDIO, 60, 424, 190, 18, WS_TABSTOP
-    LTEXT           "Volume", -1,                           12, 453, 44, 12
-    CONTROL         "", IDC_VOLUME_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 60, 447, 258, 24
-    LTEXT           "75%", IDC_LABEL_VOLUME,                 324, 453, 78, 12, SS_RIGHT
-    LTEXT           "Internal simple piano synth (XAudio2)", IDC_LABEL_AUDIO_STATUS, 60, 476, 330, 12, SS_LEFTNOWORDWRAP
+    LTEXT           "White particle count", IDC_LABEL_PARTICLE_COUNT, 12, 277, 95, 12
+    CONTROL         "", IDC_AMBIENT_PARTICLES_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 108, 270, 210, 24
+    LTEXT           "40", IDC_LABEL_AMBIENT_PARTICLES,               324, 277, 78, 12, SS_RIGHT
 
-    LTEXT           "Rendering creates H.264/AAC MP4 via FFmpeg.", -1, 12, 503, 390, 12, SS_LEFT
+    LTEXT           "Note Glow strength", IDC_LABEL_NOTE_GLOW_STRENGTH, 12, 303, 94, 12
+    CONTROL         "", IDC_NOTE_GLOW_INTENSITY_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 108, 296, 210, 24
+    LTEXT           "100%", IDC_LABEL_NOTE_GLOW_INTENSITY,            324, 303, 78, 12, SS_RIGHT
+
+    LTEXT           "Wave Line amplitude", IDC_LABEL_WAVE_LINE_AMPLITUDE, 12, 333, 94, 12
+    CONTROL         "", IDC_WAVE_LINE_AMPLITUDE_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 108, 326, 210, 24
+    LTEXT           "108%", IDC_VALUE_WAVE_LINE_AMPLITUDE,             324, 333, 78, 12, SS_RIGHT
+
+    LTEXT           "Track color", IDC_LABEL_TRACK_SECTION,           12, 374, 62, 12
+    CONTROL         "", IDC_TRACK_COMBO, "COMBOBOX", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 78, 370, 190, 53
+    PUSHBUTTON      "Choose Color...", IDC_BTN_TRACK_COLOR,           276, 369, 96, 22
+    PUSHBUTTON      "Reset All", IDC_BTN_TRACK_RESET,                 276, 394, 96, 22
+    LTEXT           "Track palette", IDC_LABEL_TRACK_COLOR,            78, 399, 190, 12, SS_LEFTNOWORDWRAP
+
+    // Audio / WAV page (optional external soundtrack settings)
+    AUTOCHECKBOX    "Enable internal synth", IDC_ENABLE_AUDIO,        12, 178, 180, 18, WS_TABSTOP
+    LTEXT           "Volume", IDC_LABEL_VOLUME_SECTION,               12, 212, 44, 12
+    CONTROL         "", IDC_VOLUME_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 60, 205, 258, 24
+    LTEXT           "75%", IDC_LABEL_VOLUME,                          324, 212, 78, 12, SS_RIGHT
+    LTEXT           "Internal simple piano synth (XAudio2)", IDC_LABEL_AUDIO_STATUS, 12, 238, 398, 12, SS_LEFTNOWORDWRAP
+
+    PUSHBUTTON      "Load WAV...", IDC_BTN_WAV_OPEN,                  12, 260, 86, 23, WS_TABSTOP
+    PUSHBUTTON      "Unload", IDC_BTN_WAV_UNLOAD,                    104, 260, 62, 23, WS_TABSTOP
+    LTEXT           "(No WAV loaded)", IDC_LABEL_WAV_FILE,            174, 266, 236, 12, SS_LEFTNOWORDWRAP
+    LTEXT           "WAV offset", IDC_LABEL_WAV_OFFSET_SECTION,       12, 295, 62, 12
+    CONTROL         "", IDC_WAV_OFFSET_SLIDER, "msctls_trackbar32", TBS_AUTOTICKS | WS_TABSTOP, 80, 288, 238, 24
+    LTEXT           "N/A", IDC_LABEL_WAV_OFFSET,                      324, 295, 78, 12, SS_RIGHT
 END
 
 IDD_RENDER_DIALOG DIALOGEX 0, 0, 390, 255

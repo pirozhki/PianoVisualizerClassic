@@ -17,22 +17,115 @@ namespace {
 
 constexpr double kPi = 3.1415926535897932384626433832795;
 constexpr double kTwoPi = 2.0 * kPi;
-constexpr std::array<double, 6> kPartialMultiplier = {
-    1.0000, 2.0001, 3.0004, 4.0010, 5.0018, 6.0028
+constexpr int kPartialCount = 8;
+constexpr int kStringCount = 3;
+constexpr double kWaveAttackSeconds = 0.010;
+constexpr double kFastDecayMix = 0.58;
+constexpr double kSlowDecayMix = 0.42;
+
+// Keep the fundamental prominent and suppress upper partials. Upper partials
+// are attenuated further as pitch rises, where they had become too conspicuous.
+constexpr std::array<double, kPartialCount> kPartialLevel = {
+    0.72, 0.105, 0.028, 0.0080, 0.0020, 0.00050, 0.00013, 0.00003
 };
-constexpr std::array<double, 6> kPartialLevel = {
-    0.72, 0.25, 0.13, 0.080, 0.050, 0.030
+constexpr std::array<double, kPartialCount> kPartialFastDecay = {
+    2.10, 2.60, 3.15, 3.75, 4.35, 5.00, 5.75, 6.50
 };
-constexpr std::array<double, 6> kPartialDecay = {
-    1.55, 2.15, 2.75, 3.35, 4.05, 4.80
+constexpr std::array<double, kPartialCount> kPartialSlowDecay = {
+    1.05, 1.40, 1.80, 2.20, 2.65, 3.15, 3.75, 4.40
 };
-constexpr std::array<double, 6> kPartialPhase = {
-    0.00, 0.37, 1.11, 2.03, 2.77, 4.19
+constexpr std::array<double, kPartialCount> kPartialPhase = {
+    0.00, 0.37, 1.11, 2.03, 2.77, 4.19, 0.91, 3.47
 };
+constexpr std::array<double, kStringCount> kStringPhase = {0.0, 0.21, 0.43};
 
 float SmoothStep(float x) {
     x = std::clamp(x, 0.0f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
+}
+
+int PianoStringCount(int midiNote) {
+    // Approximate the usual single-string bass, bichord, and trichord ranges.
+    if (midiNote < 28) return 1;
+    if (midiNote < 52) return 2;
+    return 3;
+}
+
+double StringDetune(int midiNote, int stringIndex) {
+    const int count = PianoStringCount(midiNote);
+    if (count <= 1) return 0.0;
+
+    double detune = 0.0;
+    if (count == 2) {
+        detune = stringIndex == 0 ? -0.00035 : 0.00035;
+    } else {
+        constexpr std::array<double, kStringCount> detuneByString = {
+            -0.00095, 0.0, 0.00080
+        };
+        detune = detuneByString[static_cast<std::size_t>(stringIndex)];
+    }
+
+    // Keep the slight unison beating in the bass/midrange, but make it much
+    // less noticeable in the treble, where it can sound like ringing/chorus.
+    const double highRegister = std::clamp((static_cast<double>(midiNote) - 48.0) / 60.0, 0.0, 1.0);
+    return detune * (1.0 - 0.90 * highRegister);
+}
+
+double StringWeight(int midiNote, int stringIndex) {
+    const int count = PianoStringCount(midiNote);
+    if (count <= 1) return stringIndex == 0 ? 1.0 : 0.0;
+    if (count == 2) return stringIndex < 2 ? 0.5 : 0.0;
+    constexpr std::array<double, kStringCount> weights = {0.28, 0.44, 0.28};
+    return weights[static_cast<std::size_t>(stringIndex)];
+}
+
+double StringInharmonicity(int midiNote) {
+    // A small, pitch-dependent stiffness term. This is an inexpensive
+    // approximation of piano-string inharmonicity, not a full string solver.
+    const double pitch = std::clamp(static_cast<double>(midiNote) / 127.0, 0.0, 1.0);
+    return 0.00002 + 0.00018 * std::pow(pitch, 1.6);
+}
+
+double PartialFrequencyFromStiffness(double fundamental, double stiffness, int partialIndex) {
+    const double order = static_cast<double>(partialIndex + 1);
+    return fundamental * order * std::sqrt(
+        (1.0 + stiffness * order * order) / (1.0 + stiffness));
+}
+
+double PartialFrequency(double fundamental, int midiNote, int partialIndex) {
+    return PartialFrequencyFromStiffness(
+        fundamental, StringInharmonicity(midiNote), partialIndex);
+}
+
+double PartialLevelForNote(int midiNote, int partialIndex) {
+    const double level = kPartialLevel[static_cast<std::size_t>(partialIndex)];
+    if (partialIndex == 0) return level; // Keep the fundamental level unchanged.
+
+    // Progressively darken the tone toward the treble. At MIDI 108 and above,
+    // upper partials are only 5% of their already reduced base levels.
+    const double highRegister = std::clamp((static_cast<double>(midiNote) - 48.0) / 60.0, 0.0, 1.0);
+    const double upperPartialScale = std::pow(0.05, highRegister);
+    return level * upperPartialScale;
+}
+
+double PartialEnvelope(int partialIndex, double time, int midiNote) {
+    const double fast = std::exp(-kPartialFastDecay[static_cast<std::size_t>(partialIndex)] * time);
+    const double slow = std::exp(-kPartialSlowDecay[static_cast<std::size_t>(partialIndex)] * time);
+    return PartialLevelForNote(midiNote, partialIndex) *
+        (kFastDecayMix * fast + kSlowDecayMix * slow);
+}
+
+float VelocityFilterAlpha(int velocity) {
+    // XAudio2's one-pole low-pass takes its coefficient directly in Frequency.
+    // Soft strokes get a lower coefficient (warmer tone); hard strokes keep
+    // more upper partials. The same coefficient is used by the offline renderer.
+    const float v = static_cast<float>(std::clamp(velocity, 1, 127)) / 127.0f;
+    return 0.36f + 0.58f * std::pow(v, 0.85f);
+}
+
+double SoundingEnd(const MidiNote& note) {
+    // Preserve compatibility with notes constructed outside the MIDI parser.
+    return std::max(note.end, note.soundingEnd);
 }
 
 } // namespace
@@ -98,47 +191,76 @@ void SimpleSynth::GenerateNoteBuffers() {
         buffer.resize(static_cast<std::size_t>(waveSamples));
 
         const double frequency = NoteFrequency(midiNote);
-        std::array<float, 6> sinPhase{};
-        std::array<float, 6> cosPhase{};
-        std::array<float, 6> sinDelta{};
-        std::array<float, 6> cosDelta{};
-        std::array<float, 6> envelope{};
-        std::array<float, 6> envelopeDecay{};
+        std::array<float, kPartialCount * kStringCount> sinPhase{};
+        std::array<float, kPartialCount * kStringCount> cosPhase{};
+        std::array<float, kPartialCount * kStringCount> sinDelta{};
+        std::array<float, kPartialCount * kStringCount> cosDelta{};
+        std::array<float, kPartialCount> fastEnvelope{};
+        std::array<float, kPartialCount> slowEnvelope{};
+        std::array<float, kPartialCount> fastEnvelopeDecay{};
+        std::array<float, kPartialCount> slowEnvelopeDecay{};
+        const int strings = PianoStringCount(midiNote);
+        std::array<float, kStringCount> stringWeights{};
+        for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+            stringWeights[static_cast<std::size_t>(stringIndex)] =
+                static_cast<float>(StringWeight(midiNote, stringIndex));
+        }
 
-        for (int p = 0; p < 6; ++p) {
-            const double partialFrequency = frequency * kPartialMultiplier[p];
-            if (partialFrequency > 0.45 * static_cast<double>(kSampleRate)) {
-                envelope[p] = 0.0f;
-                envelopeDecay[p] = 1.0f;
-                continue;
+        for (int p = 0; p < kPartialCount; ++p) {
+            const float partialLevel = static_cast<float>(PartialLevelForNote(midiNote, p));
+            fastEnvelope[p] = partialLevel;
+            slowEnvelope[p] = partialLevel;
+            fastEnvelopeDecay[p] = static_cast<float>(
+                std::exp(-kPartialFastDecay[p] / static_cast<double>(kSampleRate)));
+            slowEnvelopeDecay[p] = static_cast<float>(
+                std::exp(-kPartialSlowDecay[p] / static_cast<double>(kSampleRate)));
+
+            const double partialFrequency = PartialFrequency(frequency, midiNote, p);
+            for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+                const std::size_t index = static_cast<std::size_t>(p * kStringCount + stringIndex);
+                const double detunedFrequency = partialFrequency * (1.0 + StringDetune(midiNote, stringIndex));
+                // Base buffers are later pitch-shifted by at most a few semitones.
+                // Keep a little more Nyquist headroom than a direct note renderer.
+                if (detunedFrequency > 0.40 * static_cast<double>(kSampleRate)) {
+                    sinPhase[index] = cosPhase[index] = 0.0f;
+                    sinDelta[index] = cosDelta[index] = 0.0f;
+                    continue;
+                }
+
+                const double omega = kTwoPi * detunedFrequency / static_cast<double>(kSampleRate);
+                const double phase = kPartialPhase[p] + kStringPhase[stringIndex] * (p + 1);
+                sinDelta[index] = static_cast<float>(std::sin(omega));
+                cosDelta[index] = static_cast<float>(std::cos(omega));
+                sinPhase[index] = static_cast<float>(std::sin(phase));
+                cosPhase[index] = static_cast<float>(std::cos(phase));
             }
-
-            const double omega = kTwoPi * partialFrequency / static_cast<double>(kSampleRate);
-            sinDelta[p] = static_cast<float>(std::sin(omega));
-            cosDelta[p] = static_cast<float>(std::cos(omega));
-            sinPhase[p] = static_cast<float>(std::sin(kPartialPhase[p]));
-            cosPhase[p] = static_cast<float>(std::cos(kPartialPhase[p]));
-            envelope[p] = static_cast<float>(kPartialLevel[p]);
-            envelopeDecay[p] = static_cast<float>(
-                std::exp(-kPartialDecay[p] / static_cast<double>(kSampleRate)));
         }
 
         for (int i = 0; i < waveSamples; ++i) {
             const double t = static_cast<double>(i) / kSampleRate;
-            const float attack = SmoothStep(static_cast<float>(t / 0.008));
+            const float attack = SmoothStep(static_cast<float>(t / kWaveAttackSeconds));
             float sample = 0.0f;
 
-            for (int p = 0; p < 6; ++p) {
-                sample += envelope[p] * sinPhase[p];
-                const float oldSin = sinPhase[p];
-                sinPhase[p] = oldSin * cosDelta[p] + cosPhase[p] * sinDelta[p];
-                cosPhase[p] = cosPhase[p] * cosDelta[p] - oldSin * sinDelta[p];
-                envelope[p] *= envelopeDecay[p];
+            for (int p = 0; p < kPartialCount; ++p) {
+                const float envelope = static_cast<float>(kFastDecayMix) * fastEnvelope[p] +
+                    static_cast<float>(kSlowDecayMix) * slowEnvelope[p];
+
+                for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+                    const std::size_t index = static_cast<std::size_t>(p * kStringCount + stringIndex);
+                    sample += envelope * stringWeights[static_cast<std::size_t>(stringIndex)] * sinPhase[index];
+
+                    const float oldSin = sinPhase[index];
+                    sinPhase[index] = oldSin * cosDelta[index] + cosPhase[index] * sinDelta[index];
+                    cosPhase[index] = cosPhase[index] * cosDelta[index] - oldSin * sinDelta[index];
+                }
+
+                fastEnvelope[p] *= fastEnvelopeDecay[p];
+                slowEnvelope[p] *= slowEnvelopeDecay[p];
             }
 
-            sample *= attack;
-            sample = static_cast<float>(std::tanh(sample * 1.15f));
-            sample = std::clamp(sample * 0.82f, -1.0f, 1.0f);
+            // Avoid nonlinear saturation that can make the attack sound buzzy.
+            sample *= attack * 0.78f;
+            sample = std::clamp(sample, -1.0f, 1.0f);
             buffer[static_cast<std::size_t>(i)] = static_cast<int16_t>(
                 std::lrint(sample * 32767.0f));
         }
@@ -156,7 +278,7 @@ bool SimpleSynth::CreateVoices() {
 
     for (Voice& voice : voices_) {
         const HRESULT hr = xaudio_->CreateSourceVoice(
-            &voice.source, &format, 0, XAUDIO2_DEFAULT_FREQ_RATIO,
+            &voice.source, &format, XAUDIO2_VOICE_USEFILTER, XAUDIO2_DEFAULT_FREQ_RATIO,
             nullptr, nullptr, nullptr);
         if (FAILED(hr)) return false;
         voice.noteIndex = -1;
@@ -233,23 +355,27 @@ void SimpleSynth::SetMasterVolume(float volume) {
 }
 
 float SimpleSynth::SynthSample(double time, double frequency, int midiNote, int sampleIndex) {
-    (void)midiNote;
     (void)sampleIndex;
     if (time < 0.0 || frequency <= 0.0) return 0.0f;
 
     float sample = 0.0f;
-    for (int p = 0; p < 6; ++p) {
-        const double partialFrequency = frequency * kPartialMultiplier[p];
-        if (partialFrequency > 0.45 * static_cast<double>(kSampleRate)) continue;
-        const double phase = kTwoPi * partialFrequency * time + kPartialPhase[p];
-        const double envelope = kPartialLevel[p] * std::exp(-kPartialDecay[p] * time);
-        sample += static_cast<float>(std::sin(phase) * envelope);
+    const int strings = PianoStringCount(midiNote);
+    const double stiffness = StringInharmonicity(midiNote);
+    for (int p = 0; p < kPartialCount; ++p) {
+        const double partialFrequency = PartialFrequencyFromStiffness(frequency, stiffness, p);
+        if (partialFrequency > 0.40 * static_cast<double>(kSampleRate)) continue;
+        const double envelope = PartialEnvelope(p, time, midiNote);
+
+        for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+            const double detunedFrequency = partialFrequency * (1.0 + StringDetune(midiNote, stringIndex));
+            const double phase = kTwoPi * detunedFrequency * time +
+                kPartialPhase[p] + kStringPhase[stringIndex] * (p + 1);
+            sample += static_cast<float>(std::sin(phase) * envelope * StringWeight(midiNote, stringIndex));
+        }
     }
 
-    const float attack = SmoothStep(static_cast<float>(time / 0.008));
-    sample *= attack;
-    sample = static_cast<float>(std::tanh(sample * 1.15f));
-    return std::clamp(sample * 0.82f, -1.0f, 1.0f);
+    sample *= SmoothStep(static_cast<float>(time / kWaveAttackSeconds)) * 0.78f;
+    return std::clamp(sample, -1.0f, 1.0f);
 }
 
 double SimpleSynth::NoteFrequency(int midiNote) {
@@ -260,7 +386,18 @@ double SimpleSynth::NoteFrequency(int midiNote) {
 int SimpleSynth::BaseMidiNoteFor(int midiNote) {
     midiNote = std::clamp(midiNote, 0, 127);
     const int index = std::clamp((midiNote + kBaseStep / 2) / kBaseStep, 0, kBaseCount - 1);
-    return index * kBaseStep;
+    int baseNote = index * kBaseStep;
+
+    // Keep notes near the single/double/triple-string transitions on a cached
+    // waveform with the matching string-count model.
+    if (midiNote < 28 && baseNote >= 28) {
+        baseNote = 24;
+    } else if (midiNote >= 28 && midiNote < 52 && baseNote >= 52) {
+        baseNote = 48;
+    } else if (midiNote >= 52 && baseNote < 52) {
+        baseNote = 52;
+    }
+    return std::clamp(baseNote, 0, 124);
 }
 
 int SimpleSynth::FindVoiceToUse(double time) {
@@ -305,9 +442,9 @@ void SimpleSynth::StartNote(size_t noteIndex, double time) {
     xbuffer.AudioBytes = static_cast<UINT32>(buffer.size() * sizeof(int16_t));
     xbuffer.pAudioData = reinterpret_cast<const BYTE*>(buffer.data());
 
-    // The six-second body is now a normal decay followed by a very quiet infinite
-    // tail loop. This removes the hard six-second cutoff for long held notes while
-    // keeping memory use modest. The offline renderer continues analytically instead.
+    // The precomputed body is a natural decay followed by a very quiet infinite
+    // tail loop. This avoids a hard cutoff for long held notes without calculating
+    // the oscillators on the real-time audio thread. The offline renderer continues analytically.
     const UINT32 loopSamples = static_cast<UINT32>(
         std::min<std::size_t>(buffer.size(), static_cast<std::size_t>(kReleaseTailSeconds * kSampleRate)));
     if (loopSamples > 0) {
@@ -326,13 +463,19 @@ void SimpleSynth::StartNote(size_t noteIndex, double time) {
     const double ratio = NoteFrequency(note.note) / NoteFrequency(baseMidi);
     voice.source->SetFrequencyRatio(static_cast<float>(ratio), XAUDIO2_COMMIT_NOW);
 
+    XAUDIO2_FILTER_PARAMETERS toneFilter{};
+    toneFilter.Type = LowPassOnePoleFilter;
+    toneFilter.Frequency = VelocityFilterAlpha(note.velocity);
+    toneFilter.OneOverQ = 1.0f;
+    voice.source->SetFilterParameters(&toneFilter, XAUDIO2_COMMIT_NOW);
+
     voice.volume = 0.18f + 0.72f * std::sqrt(
         static_cast<float>(std::clamp(note.velocity, 1, 127)) / 127.0f);
     voice.source->SetVolume(0.0f, XAUDIO2_COMMIT_NOW);
     voice.source->Start(0, XAUDIO2_COMMIT_NOW);
 
     voice.noteIndex = static_cast<int>(noteIndex);
-    voice.noteEnd = std::max(note.end, note.start + 0.005);
+    voice.noteEnd = std::max(SoundingEnd(note), note.start + 0.005);
     voice.releasing = false;
     voice.attackStart = time;
     voice.releaseStart = 0.0;
@@ -416,10 +559,14 @@ bool SimpleSynth::RenderWav(const MidiSong& song, const std::wstring& path,
     std::vector<float> mix(kBlockFrames, 0.0f);
     std::vector<std::int16_t> pcm(kBlockFrames * channels);
 
+    // Maintain one small filter state per note so velocity-dependent timbre is
+    // also reflected in exported WAV/MP4 audio, without any runtime synth cost.
+    std::vector<float> filterStates(song.notes.size(), 0.0f);
+
     std::vector<double> prefixMaxEnd(song.notes.size(), 0.0);
     double maxEnd = 0.0;
     for (std::size_t i = 0; i < song.notes.size(); ++i) {
-        maxEnd = std::max(maxEnd, song.notes[i].end + kReleaseSeconds);
+        maxEnd = std::max(maxEnd, SoundingEnd(song.notes[i]) + kReleaseSeconds);
         prefixMaxEnd[i] = maxEnd;
     }
 
@@ -441,10 +588,10 @@ bool SimpleSynth::RenderWav(const MidiSong& song, const std::wstring& path,
             firstIndex = static_cast<std::size_t>(std::distance(prefixMaxEnd.begin(), firstIt));
         }
 
-        for (auto it = song.notes.begin() + static_cast<std::ptrdiff_t>(firstIndex);
-             it != blockEndIt; ++it) {
-            const MidiNote& note = *it;
-            if (note.note < 0 || note.note > 127 || note.end <= note.start) continue;
+        for (std::size_t noteIndex = firstIndex; noteIndex < blockEndIndex; ++noteIndex) {
+            const MidiNote& note = song.notes[noteIndex];
+            const double audioEnd = SoundingEnd(note);
+            if (note.note < 0 || note.note > 127 || audioEnd <= note.start) continue;
 
             const int baseMidi = BaseMidiNoteFor(note.note);
             const int baseIndex = baseMidi / kBaseStep;
@@ -455,16 +602,17 @@ bool SimpleSynth::RenderWav(const MidiSong& song, const std::wstring& path,
             const float velocityGain = 0.18f + 0.72f * std::sqrt(
                 static_cast<float>(std::clamp(note.velocity, 1, 127)) / 127.0f);
             const float noteGain = velocityGain * volume;
+            const float filterAlpha = VelocityFilterAlpha(note.velocity);
 
             const std::uint64_t noteStartFrame = static_cast<std::uint64_t>(
                 std::max(0.0, std::floor(note.start * sampleRate)));
             const std::uint64_t noteEndFrame = static_cast<std::uint64_t>(
-                std::max(0.0, std::ceil((note.end + kReleaseSeconds) * sampleRate)));
+                std::max(0.0, std::ceil((audioEnd + kReleaseSeconds) * sampleRate)));
             const std::uint64_t from = std::max(blockStartFrame, noteStartFrame);
             const std::uint64_t to = std::min(blockStartFrame + frames, noteEndFrame);
             if (from >= to) continue;
 
-            const double noteDuration = std::max(0.0, note.end - note.start);
+            const double noteDuration = std::max(0.0, audioEnd - note.start);
 
             for (std::uint64_t frame = from; frame < to; ++frame) {
                 const double t = static_cast<double>(frame) / sampleRate - note.start;
@@ -481,17 +629,23 @@ bool SimpleSynth::RenderWav(const MidiSong& song, const std::wstring& path,
                     const float s1 = static_cast<float>(wave[i0 + 1]) / 32768.0f;
                     sample = s0 + (s1 - s0) * frac;
                 } else {
-                    // Beyond the cached six-second body, continue the note analytically.
-                    // The exponential partial envelopes naturally converge toward silence.
+                    // Beyond the cached waveform body, continue the note analytically.
+                    // The inharmonic partials and dual decay envelopes naturally converge toward silence.
                     sample = SynthSample(sourceTime, NoteFrequency(baseMidi), baseMidi,
                                          static_cast<int>(frame - blockStartFrame));
                 }
 
-                double envelope = 1.0;
+                // A one-pole low-pass is a cheap approximation of the live
+                // XAudio2 filter. It makes soft strikes rounder and hard strikes brighter.
+                float& filterState = filterStates[noteIndex];
+                filterState += filterAlpha * (sample - filterState);
+                sample = filterState;
+
+                double envelope = SmoothStep(static_cast<float>(t / kAttackSeconds));
                 if (t >= noteDuration) {
                     const double rel = t - noteDuration;
                     const double u = std::clamp(rel / kReleaseSeconds, 0.0, 1.0);
-                    envelope = 1.0 - u * u * (3.0 - 2.0 * u);
+                    envelope *= 1.0 - u * u * (3.0 - 2.0 * u);
                 }
 
                 mix[static_cast<std::size_t>(frame - blockStartFrame)] +=
@@ -523,6 +677,7 @@ bool SimpleSynth::RenderWav(const MidiSong& song, const std::wstring& path,
     const float renderGain = maximumAbsMix > kPeakTarget
         ? kPeakTarget / maximumAbsMix
         : 1.0f;
+    std::fill(filterStates.begin(), filterStates.end(), 0.0f);
 
     const std::uint32_t dataBytes = static_cast<std::uint32_t>(
         totalFrames * channels * sizeof(std::int16_t));
@@ -606,11 +761,11 @@ void SimpleSynth::AudioThreadMain() {
     auto eventIt = std::lower_bound(song->notes.begin(), song->notes.end(), baseTime,
         [](const MidiNote& note, double time) { return note.start < time; });
     std::size_t nextIndex = static_cast<std::size_t>(std::distance(song->notes.begin(), eventIt));
-    std::size_t firstActive = nextIndex;
-
-    while (firstActive > 0 && song->notes[firstActive - 1].end > baseTime) --firstActive;
-    for (std::size_t i = firstActive; i < nextIndex; ++i) {
-        if (song->notes[i].end > baseTime) StartNote(i, baseTime);
+    // Reconstruct all notes that are still sounding at the requested start time.
+    // A note may have received physical note-off already but remain audible under
+    // CC64 sustain, so this must use soundingEnd rather than the visual note end.
+    for (std::size_t i = 0; i < nextIndex; ++i) {
+        if (SoundingEnd(song->notes[i]) > baseTime) StartNote(i, baseTime);
     }
 
     const auto sleepQuantum = std::chrono::milliseconds(1);

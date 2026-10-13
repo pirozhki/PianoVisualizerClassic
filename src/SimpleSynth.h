@@ -40,7 +40,7 @@ public:
 private:
     static constexpr int kSampleRate = 48000;
     static constexpr int kVoiceCount = 64;
-    static constexpr double kBufferSeconds = 6.0;
+    static constexpr double kBufferSeconds = 8.0;
     static constexpr double kReleaseTailSeconds = 0.50;
     static constexpr double kAttackSeconds = 0.004;
     static constexpr double kReleaseSeconds = 0.065;

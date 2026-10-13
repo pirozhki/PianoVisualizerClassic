@@ -27,7 +27,7 @@ public:
     enum EffectFlag : std::uint32_t {
         EffectNone = 0,
         EffectSmokeGlow = 1u << 0,
-        EffectSpark = 1u << 1,
+        EffectWaterDroplets = 1u << 1,
         EffectRipple = 1u << 2,
         EffectDiamondRipple = 1u << 3,
         EffectNoteGlow = 1u << 4,
@@ -36,6 +36,7 @@ public:
         EffectSmokeWindow = 1u << 7,
         EffectAmbientParticles = 1u << 8,
         EffectImpactPolygons = 1u << 9,
+        EffectKeybedGlow = 1u << 10,
     };
     using EffectMask = std::uint32_t;
 
@@ -53,6 +54,7 @@ public:
     void SetInteractiveSeeking(bool seeking) { interactiveSeeking_ = seeking; }
     void Reset();
     void SetTime(double seconds);
+    void SetTailDurationSeconds(double seconds) { tailDurationSeconds_ = std::clamp(seconds, 0.0, 60.0); }
     double Time() const { return currentTime_; }
     double Duration() const { return song_ ? song_->duration : 0.0; }
     void SetFallSpeed(float pxPerSecond) { fallSpeed_ = pxPerSecond; }
@@ -60,12 +62,21 @@ public:
 
     bool LoadBackgroundImage(const std::wstring& path);
     bool LoadBackgroundVideo(const std::wstring& path, std::wstring& error);
-    void ResetBackgroundImage();
+    void UnloadBackgroundFilesPreserveSettings(); // Clears both files but retains opacity and sync settings.
+    void ResetBackgroundImage(); // Clears both background layers and resets their settings.
     void SetBackgroundOpacity(float opacity);
     static constexpr float kDefaultBackgroundOpacity = 0.30f;
-    float BackgroundOpacity() const { return backgroundOpacity_; }
-    bool HasBackground() const { return !backgroundPath_.empty(); }
-    bool HasBackgroundVideo() const { return backgroundIsVideo_; }
+    float BackgroundOpacity() const { return BackgroundImageOpacity(); }
+    void SetBackgroundImageOpacity(float opacity) { backgroundImageOpacity_ = std::clamp(opacity, 0.0f, 1.0f); }
+    float BackgroundImageOpacity() const { return backgroundImageOpacity_; }
+    void SetBackgroundVideoOpacity(float opacity) { backgroundVideoOpacity_ = std::clamp(opacity, 0.0f, 1.0f); }
+    float BackgroundVideoOpacity() const { return backgroundVideoOpacity_; }
+    bool HasBackground() const { return HasBackgroundImage() || HasBackgroundVideo(); }
+    bool HasBackgroundImage() const { return !backgroundImagePath_.empty(); }
+    bool HasBackgroundVideo() const { return !backgroundVideoPath_.empty(); }
+    const std::wstring& BackgroundPath() const { return HasBackgroundImage() ? backgroundImagePath_ : backgroundVideoPath_; }
+    const std::wstring& BackgroundImagePath() const { return backgroundImagePath_; }
+    const std::wstring& BackgroundVideoPath() const { return backgroundVideoPath_; }
     static constexpr int kMinVideoOffsetMilliseconds = -10000;
     static constexpr int kMaxVideoOffsetMilliseconds = 10000;
     void SetVideoOffsetMilliseconds(int milliseconds) {
@@ -81,6 +92,12 @@ public:
     void SetEffectEnabled(EffectFlag flag, bool enabled);
     bool IsEffectEnabled(EffectFlag flag) const { return (effectMask_ & flag) != 0; }
     void SetWaveLineColor(const D2D1::ColorF& color);
+    void SetWaveLineAmplitude(float amplitude) { waveLineAmplitude_ = std::clamp(amplitude, 0.0f, 4.0f); }
+    float WaveLineAmplitude() const { return waveLineAmplitude_; }
+    void SetNoteGlowIntensity(float intensity) { noteGlowIntensity_ = std::clamp(intensity, 0.0f, 1.0f); }
+    float NoteGlowIntensity() const { return noteGlowIntensity_; }
+    void SetWaveLineGlowEnabled(bool enabled) { waveLineGlowEnabled_ = enabled; }
+    bool WaveLineGlowEnabled() const { return waveLineGlowEnabled_; }
     void SetAmbientParticleCount(int count);
     int AmbientParticleCount() const { return ambientParticleCount_; }
     D2D1::ColorF GetWaveLineColor() const { return waveLineColor_; }
@@ -98,7 +115,7 @@ private:
     static constexpr int kMaxImpactShards = 480;
     static constexpr int kMaxHitWaves = 96;
     static constexpr int kDefaultPaletteCount = 4;
-    static constexpr int kCinemaParticleCount = 16;
+    static constexpr int kWaterDropletsPerHit = 6;
     static constexpr float kSmokeEmissionInterval = 0.12f;
     static constexpr int kSmokeParticlesPerBurst = 3;
     static constexpr int kCrossParticlesPerBurst = 2;
@@ -118,9 +135,9 @@ private:
         float windPhase = 0.0f;
         float gravity = 0.0f;
         int track = 0;
-        bool spark = false;
-        bool whiteSpark = false;
+        bool waterDroplet = false;
         bool crossSpark = false;
+        float dropletWhiteMix = 0.0f;
     };
 
     struct ImpactShard {
@@ -186,13 +203,12 @@ private:
     void DrawNoteGuides(float width, float height);
     void DrawNotes(float width, float height);
     void DrawKeyboard(float width, float height);
+    void DrawKeybedGlow();
 
     size_t TrackBrushIndex(int track) const;
     ID2D1SolidColorBrush* NoteBrushForTrack(int track) const;
     ID2D1SolidColorBrush* GlowBrushForTrack(int track) const;
     ID2D1RadialGradientBrush* SmokeBrushForTrack(int track) const;
-    ID2D1LinearGradientBrush* BeamBrushForTrack(int track) const;
-    ID2D1LinearGradientBrush* ActiveBlackBrushForTrack(int track) const;
     D2D1::ColorF NoteColorForTrack(int track) const;
     D2D1::ColorF GlowColorForTrack(int track) const;
 
@@ -212,24 +228,24 @@ private:
     std::vector<Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> noteBrushes_;
     std::vector<Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> glowBrushes_;
     std::vector<Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush>> smokeBrushes_;
-    std::vector<Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> beamBrushes_;
+    std::vector<Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush>> keybedGlowBrushes_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> darkBg_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> waveLineBrush_;
     Microsoft::WRL::ComPtr<ID2D1PathGeometry> triangleGeometry_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> whiteKeyBrush_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> blackKeyBrush_;
-    std::vector<Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> activeBlackBrushes_;
 
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> c4LabelFormat_;
 
     Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory_;
     Microsoft::WRL::ComPtr<IWICBitmapSource> backgroundSource_;
-    Microsoft::WRL::ComPtr<ID2D1Bitmap> backgroundBitmap_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> backgroundImageBitmap_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> backgroundVideoBitmap_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> smokeWindowBitmap_;
     std::uint32_t smokeWindowSeed_ = 0;
-    std::wstring backgroundPath_;
-    bool backgroundIsVideo_ = false;
+    std::wstring backgroundImagePath_;
+    std::wstring backgroundVideoPath_;
     bool interactiveSeeking_ = false;
     // Positive values delay the background video; negative values advance it.
     int videoOffsetMilliseconds_ = 0;
@@ -239,13 +255,15 @@ private:
     UINT backgroundVideoHeight_ = 0;
     std::uint64_t backgroundVideoFrameVersion_ = 0;
     std::uint64_t backgroundBitmapFrameVersion_ = 0;
-    float backgroundOpacity_ = kDefaultBackgroundOpacity;
+    float backgroundImageOpacity_ = kDefaultBackgroundOpacity;
+    float backgroundVideoOpacity_ = kDefaultBackgroundOpacity;
 
     std::vector<D2D1::ColorF> trackColors_;
     std::vector<bool> customTrackColors_;
 
     const MidiSong* song_ = nullptr;
     double currentTime_ = 0.0;
+    double tailDurationSeconds_ = 3.0;
     bool playing_ = false;
     float fallSpeed_ = 380.0f;
     double maxNoteDuration_ = 1.0;
@@ -255,8 +273,13 @@ private:
     float keyboardHeight_ = 160.0f;
     float hitY_ = 500.0f;
 
-    EffectMask effectMask_ = EffectSmokeGlow | EffectCrossSpark | EffectWaveLine;
+    EffectMask effectMask_ = EffectSmokeGlow | EffectCrossSpark | EffectWaveLine | EffectKeybedGlow;
     bool showNoteGuides_ = true;
+    float noteGlowIntensity_ = 1.0f;
+    bool waveLineGlowEnabled_ = true;
+    // Multiplier for Wave Line amplitude. The slider maps 100% to the
+    // previous 200% output, so 108% corresponds to a 2.16x multiplier.
+    float waveLineAmplitude_ = 2.16f;
     D2D1::ColorF waveLineColor_ = D2D1::ColorF(0.24f, 0.82f, 0.94f, 1.0f);
     int ambientParticleCount_ = 40;
     std::array<Particle, kMaxParticles> particles_{};

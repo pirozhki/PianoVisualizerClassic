@@ -210,9 +210,12 @@ std::vector<std::pair<std::uint64_t, std::uint32_t>> BuildTempoMap(const std::ve
         }
     }
 
-    std::sort(tempos.begin(), tempos.end(), [](const auto& a, const auto& b) {
-        if (a.first != b.first) return a.first < b.first;
-        return a.second < b.second;
+    // Keep the original order for tempo events at the same tick. The default
+    // tempo is inserted first, so a real tempo event at tick 0 must override it.
+    // Sorting by tempo value here would incorrectly let the 120 BPM default
+    // override faster initial tempos (for example, 150 BPM / 400000 us per beat).
+    std::stable_sort(tempos.begin(), tempos.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
     });
 
     std::vector<std::pair<std::uint64_t, std::uint32_t>> merged;
@@ -307,6 +310,7 @@ void ExtractNoteIntervals(
             result.velocity = velocity;
             result.start = TickToSeconds(startTick, song, tempos);
             result.end = TickToSeconds(event.tick, song, tempos);
+            result.soundingEnd = result.end;
             notes.push_back(result);
         }
 
@@ -325,10 +329,68 @@ void ExtractNoteIntervals(
                     result.velocity = velocity;
                     result.start = TickToSeconds(startTick, song, tempos);
                     result.end = TickToSeconds(track.endTick, song, tempos);
+                    result.soundingEnd = result.end;
                     notes.push_back(result);
                 }
             }
         }
+    }
+}
+
+void ExtractSustainEvents(
+    const std::vector<RawTrack>& tracks,
+    const MidiSong& song,
+    const std::vector<std::pair<std::uint64_t, std::uint32_t>>& tempos,
+    std::vector<MidiSustainEvent>& sustainEvents) {
+
+    for (const RawTrack& track : tracks) {
+        for (const RawEvent& event : track.events) {
+            // Control Change (0xB0), controller 64 = sustain/damper pedal.
+            if ((event.status & 0xF0) != 0xB0 || event.data1 != 64) continue;
+            MidiSustainEvent pedal;
+            pedal.time = TickToSeconds(event.tick, song, tempos);
+            pedal.channel = event.status & 0x0F;
+            pedal.value = event.data2;
+            sustainEvents.push_back(pedal);
+        }
+    }
+
+    // Preserve file/track event order for events at the same timestamp.
+    std::stable_sort(sustainEvents.begin(), sustainEvents.end(),
+        [](const MidiSustainEvent& a, const MidiSustainEvent& b) {
+            return a.time < b.time;
+        });
+}
+
+void ApplySustainPedalToNotes(MidiSong& song) {
+    // Keep note.end intact for visual note length. Only soundingEnd is extended
+    // when CC64 is down at the physical key-release time.
+    for (MidiNote& note : song.notes) {
+        note.soundingEnd = note.end;
+        bool pedalDown = false;
+        bool foundRelease = false;
+
+        for (const MidiSustainEvent& pedal : song.sustainEvents) {
+            if (pedal.channel != note.channel) continue;
+
+            if (pedal.time <= note.end) {
+                pedalDown = pedal.value >= 64;
+                continue;
+            }
+
+            if (pedalDown && pedal.value < 64) {
+                note.soundingEnd = std::max(note.end, pedal.time);
+                foundRelease = true;
+                break;
+            }
+        }
+
+        if (pedalDown && !foundRelease) {
+            // A file that never releases CC64 should not sustain indefinitely;
+            // honor it until the end of the MIDI timeline.
+            note.soundingEnd = std::max(note.end, song.duration);
+        }
+        song.duration = std::max(song.duration, note.soundingEnd);
     }
 }
 
@@ -403,6 +465,11 @@ bool LoadMidiFile(const std::wstring& path, MidiSong& outSong, std::string& erro
 
         const auto tempos = BuildTempoMap(tracks);
         ExtractNoteIntervals(tracks, song, tempos, song.notes);
+        ExtractSustainEvents(tracks, song, tempos, song.sustainEvents);
+
+        for (const auto& pedal : song.sustainEvents) {
+            song.duration = std::max(song.duration, pedal.time);
+        }
 
         for (const auto& note : song.notes) {
             if (note.note < 21 || note.note > 108) continue;
@@ -424,6 +491,8 @@ bool LoadMidiFile(const std::wstring& path, MidiSong& outSong, std::string& erro
             for (const auto& track : tracks) maxTick = std::max(maxTick, track.endTick);
             song.duration = TickToSeconds(maxTick, song, tempos);
         }
+
+        ApplySustainPedalToNotes(song);
 
         outSong = std::move(song);
         error.clear();

@@ -12,9 +12,13 @@ struct VideoRenderOptions {
     unsigned int width = 1280;
     unsigned int height = 720;
     double fps = 60.0;
+    double tailSeconds = 3.0;
     float fallSpeed = 380.0f;
     bool includeAudio = true;
     float audioVolume = 0.75f;
+    // When non-empty, use a user-supplied WAV instead of rendering MIDI audio.
+    std::wstring audioInputPath;
+    int audioOffsetMilliseconds = 0;
     std::wstring outputPath;
     std::wstring ffmpegPath;
     std::wstring temporaryWavPath;
@@ -23,8 +27,6 @@ struct VideoRenderOptions {
 class VideoRenderer {
 public:
     using ProgressCallback = std::function<void(int percent, const std::wstring& status)>;
-
-    static constexpr double kTailSeconds = 3.00;
 
     bool RenderMp4(const Visualizer& visualizer,
                    const MidiSong& song,

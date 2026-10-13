@@ -10,7 +10,17 @@ struct MidiNote {
     int track = 0;
     int velocity = 100;
     double start = 0.0;
+    // Physical key-release time. Used by the visualization so pedal sustain
+    // does not artificially lengthen the falling-note graphics.
     double end = 0.0;
+    // Audio release time after applying MIDI sustain pedal (CC64).
+    double soundingEnd = 0.0;
+};
+
+struct MidiSustainEvent {
+    double time = 0.0;
+    int channel = 0;
+    int value = 0;
 };
 
 struct MidiTrackInfo {
@@ -25,6 +35,8 @@ struct MidiSong {
     double smpteTicksPerSecond = 0.0;
     double duration = 0.0;
     std::vector<MidiNote> notes;
+    // Sustain-pedal controller events (MIDI CC64), merged across tracks.
+    std::vector<MidiSustainEvent> sustainEvents;
     std::vector<MidiTrackInfo> tracks;
 };
 

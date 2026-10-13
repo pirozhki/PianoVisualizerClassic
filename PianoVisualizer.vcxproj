@@ -79,6 +79,7 @@
     <ClInclude Include="src\BackgroundVideoDecoder.h" />
     <ClInclude Include="src\Visualizer.h" />
     <ClInclude Include="src\SimpleSynth.h" />
+    <ClInclude Include="src\WavAudioPlayer.h" />
     <ClInclude Include="src\VideoRenderer.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
@@ -87,6 +88,7 @@
     <ClCompile Include="src\BackgroundVideoDecoder.cpp" />
     <ClCompile Include="src\Visualizer.cpp" />
     <ClCompile Include="src\SimpleSynth.cpp" />
+    <ClCompile Include="src\WavAudioPlayer.cpp" />
     <ClCompile Include="src\VideoRenderer.cpp" />
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>

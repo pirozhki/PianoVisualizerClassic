@@ -112,7 +112,7 @@ void Visualizer::Shutdown() {
     DiscardDeviceResources();
     ClearBackgroundVideoState();
     backgroundSource_.Reset();
-    backgroundPath_.clear();
+    backgroundImagePath_.clear();
     smokeWindowSeed_ = 0;
     c4LabelFormat_.Reset();
     dwriteFactory_.Reset();
@@ -160,14 +160,19 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     trackColors_ = source.trackColors_;
     customTrackColors_ = source.customTrackColors_;
     fallSpeed_ = source.fallSpeed_;
+    tailDurationSeconds_ = source.tailDurationSeconds_;
     maxNoteDuration_ = source.maxNoteDuration_;
     effectMask_ = source.effectMask_;
     ambientParticleCount_ = source.ambientParticleCount_;
     showNoteGuides_ = source.showNoteGuides_;
+    noteGlowIntensity_ = source.noteGlowIntensity_;
+    waveLineGlowEnabled_ = source.waveLineGlowEnabled_;
+    waveLineAmplitude_ = source.waveLineAmplitude_;
     waveLineColor_ = source.waveLineColor_;
-    backgroundPath_ = source.backgroundPath_;
-    backgroundIsVideo_ = source.backgroundIsVideo_;
-    backgroundOpacity_ = source.backgroundOpacity_;
+    backgroundImagePath_ = source.backgroundImagePath_;
+    backgroundVideoPath_ = source.backgroundVideoPath_;
+    backgroundImageOpacity_ = source.backgroundImageOpacity_;
+    backgroundVideoOpacity_ = source.backgroundVideoOpacity_;
     videoOffsetMilliseconds_ = source.videoOffsetMilliseconds_;
 
     width_ = static_cast<float>(std::max<UINT>(1, width));
@@ -216,16 +221,15 @@ bool Visualizer::InitializeOffscreen(const Visualizer& source, UINT width, UINT 
     if (FAILED(hr)) return false;
 
     if (!CreateDrawingResources()) return false;
-    if (!backgroundPath_.empty()) {
-        if (backgroundIsVideo_) {
-            backgroundVideo_ = std::make_unique<BackgroundVideoDecoder>();
-            std::wstring error;
-            if (!backgroundVideo_->Open(backgroundPath_, error) ||
-                !UpdateBackgroundVideoFrame(BackgroundVideoTime(0.0), true, error)) {
-                ClearBackgroundVideoState();
-                return false;
-            }
-        } else if (!LoadBackgroundSource() || !CreateBackgroundBitmap()) {
+    if (!backgroundImagePath_.empty()) {
+        if (!LoadBackgroundSource() || !CreateBackgroundBitmap()) return false;
+    }
+    if (!backgroundVideoPath_.empty()) {
+        backgroundVideo_ = std::make_unique<BackgroundVideoDecoder>();
+        std::wstring error;
+        if (!backgroundVideo_->Open(backgroundVideoPath_, error) ||
+            !UpdateBackgroundVideoFrame(BackgroundVideoTime(0.0), true, error)) {
+            ClearBackgroundVideoState();
             return false;
         }
     }
@@ -262,9 +266,24 @@ bool Visualizer::CreateDeviceResources() {
         return false;
     }
 
-    if (backgroundPath_.empty() || backgroundIsVideo_) return true;
-    if (!backgroundSource_ && !LoadBackgroundSource()) return true;
-    if (FAILED(CreateBackgroundBitmap())) backgroundBitmap_.Reset();
+    if (!backgroundImagePath_.empty()) {
+        if (!backgroundSource_) (void)LoadBackgroundSource();
+        if (backgroundSource_ && FAILED(CreateBackgroundBitmap())) backgroundImageBitmap_.Reset();
+    }
+    if (!backgroundVideoPath_.empty()) {
+        backgroundVideo_.reset();
+        backgroundVideoPixels_.clear();
+        backgroundVideoWidth_ = 0;
+        backgroundVideoHeight_ = 0;
+        backgroundVideoFrameVersion_ = 0;
+        backgroundBitmapFrameVersion_ = 0;
+        backgroundVideo_ = std::make_unique<BackgroundVideoDecoder>();
+        std::wstring error;
+        if (!backgroundVideo_->Open(backgroundVideoPath_, error) ||
+            !UpdateBackgroundVideoFrame(BackgroundVideoTime(currentTime_), true, error)) {
+            ClearBackgroundVideoState();
+        }
+    }
     return true;
 }
 
@@ -341,13 +360,11 @@ bool Visualizer::CreateDrawingResources() {
     noteBrushes_.clear();
     glowBrushes_.clear();
     smokeBrushes_.clear();
-    beamBrushes_.clear();
-    activeBlackBrushes_.clear();
+    keybedGlowBrushes_.clear();
     noteBrushes_.resize(brushCount);
     glowBrushes_.resize(brushCount);
     smokeBrushes_.resize(brushCount);
-    beamBrushes_.resize(brushCount);
-    activeBlackBrushes_.resize(brushCount);
+    keybedGlowBrushes_.resize(brushCount);
 
     for (std::size_t i = 0; i < brushCount; ++i) {
         if (FAILED(target_->CreateSolidColorBrush(
@@ -364,12 +381,10 @@ bool Visualizer::CreateDrawingResources() {
 bool Visualizer::CreateEffectBrushes() {
     if (!target_) return false;
     if (smokeBrushes_.size() != noteBrushes_.size()) smokeBrushes_.resize(noteBrushes_.size());
-    if (beamBrushes_.size() != noteBrushes_.size()) beamBrushes_.resize(noteBrushes_.size());
-    if (activeBlackBrushes_.size() != noteBrushes_.size()) activeBlackBrushes_.resize(noteBrushes_.size());
+    if (keybedGlowBrushes_.size() != noteBrushes_.size()) keybedGlowBrushes_.resize(noteBrushes_.size());
 
     for (size_t i = 0; i < noteBrushes_.size(); ++i) {
         const int track = static_cast<int>(i);
-        const D2D1::ColorF mainColor = NoteColorForTrack(track);
         const D2D1::ColorF glowColor = GlowColorForTrack(track);
 
         D2D1_GRADIENT_STOP smokeStops[4] = {
@@ -388,42 +403,24 @@ bool Visualizer::CreateEffectBrushes() {
                 D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 0.0f), 1.0f, 1.0f),
             smokeCollection.Get(), smokeBrushes_[i].ReleaseAndGetAddressOf()))) return false;
 
-        // Active white keys fade from the track glow into transparency.  The
-        // static cool-gray key underneath therefore becomes progressively more
-        // visible toward the bottom instead of being overwritten by white.
-        D2D1_GRADIENT_STOP beamStops[4] = {
-            {0.0f, D2D1::ColorF(mainColor.r, mainColor.g, mainColor.b, 0.98f)},
-            {0.42f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.72f)},
-            {0.74f, D2D1::ColorF(mainColor.r, mainColor.g, mainColor.b, 0.30f)},
-            {1.0f, D2D1::ColorF(mainColor.r, mainColor.g, mainColor.b, 0.0f)},
+        // Key contact glow is intentionally pure white. The glow is confined
+        // to the note/key boundary rather than tinting the keyboard surface.
+        D2D1_GRADIENT_STOP keybedGlowStops[4] = {
+            {0.00f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.88f)},
+            {0.18f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.72f)},
+            {0.48f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.32f)},
+            {1.00f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
         };
-        ComPtr<ID2D1GradientStopCollection> beamCollection;
+        ComPtr<ID2D1GradientStopCollection> keybedGlowCollection;
         if (FAILED(target_->CreateGradientStopCollection(
-            beamStops, 4, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
-            beamCollection.ReleaseAndGetAddressOf()))) return false;
-        if (FAILED(target_->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(
-                D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
-            beamCollection.Get(), beamBrushes_[i].ReleaseAndGetAddressOf()))) return false;
+            keybedGlowStops, 4, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
+            keybedGlowCollection.ReleaseAndGetAddressOf()))) return false;
+        if (FAILED(target_->CreateRadialGradientBrush(
+            D2D1::RadialGradientBrushProperties(
+                D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 0.0f), 1.0f, 1.0f),
+            keybedGlowCollection.Get(), keybedGlowBrushes_[i].ReleaseAndGetAddressOf()))) return false;
 
-        const D2D1::ColorF darkColor(
-            mainColor.r * 0.34f, mainColor.g * 0.34f, mainColor.b * 0.34f, 1.0f);
-        // Active black keys use the same transparent fade, revealing the black
-        // metallic key beneath more strongly toward the lower part of the key.
-        D2D1_GRADIENT_STOP blackActiveStops[4] = {
-            {0.0f, D2D1::ColorF(mainColor.r, mainColor.g, mainColor.b, 0.98f)},
-            {0.34f, D2D1::ColorF(glowColor.r, glowColor.g, glowColor.b, 0.72f)},
-            {0.72f, D2D1::ColorF(darkColor.r, darkColor.g, darkColor.b, 0.28f)},
-            {1.0f, D2D1::ColorF(darkColor.r, darkColor.g, darkColor.b, 0.0f)},
-        };
-        ComPtr<ID2D1GradientStopCollection> blackActiveCollection;
-        if (FAILED(target_->CreateGradientStopCollection(
-            blackActiveStops, 4, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
-            blackActiveCollection.ReleaseAndGetAddressOf()))) return false;
-        if (FAILED(target_->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(
-                D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
-            blackActiveCollection.Get(), activeBlackBrushes_[i].ReleaseAndGetAddressOf()))) return false;
+
     }
     // Optional effect texture: if creation fails, the visualizer itself remains usable.
     CreateSmokeWindowBitmap();
@@ -531,14 +528,14 @@ bool Visualizer::CreateSmokeWindowBitmap() {
 }
 
 void Visualizer::DiscardDeviceResources() {
-    backgroundBitmap_.Reset();
+    backgroundImageBitmap_.Reset();
+    backgroundVideoBitmap_.Reset();
     backgroundBitmapFrameVersion_ = 0;
     smokeWindowBitmap_.Reset();
-    beamBrushes_.clear();
-    activeBlackBrushes_.clear();
     whiteKeyBrush_.Reset();
     blackKeyBrush_.Reset();
     smokeBrushes_.clear();
+    keybedGlowBrushes_.clear();
     noteBrushes_.clear();
     glowBrushes_.clear();
     target_.Reset();
@@ -647,10 +644,10 @@ void Visualizer::SetTime(double seconds) {
         return;
     }
 
-    // Permit a short visual-only outro after the MIDI end. Normal seeking and
-    // the playback slider remain bounded by Duration(); the app advances this
-    // extra interval only to let transient effects finish fading out.
-    double clamped = std::clamp(seconds, -2.0, song_->duration + 3.0);
+    // Permit the configured outro after the MIDI end. Normal seeking and the
+    // playback slider remain bounded by Duration(); playback advances this
+    // extra interval so effects and the background video can finish naturally.
+    double clamped = std::clamp(seconds, -2.0, song_->duration + tailDurationSeconds_);
     if (!effectInitialized_ || std::abs(clamped - currentTime_) > 0.20) {
         ResetEffectSimulation(clamped - 0.001);
     }
@@ -724,11 +721,11 @@ bool Visualizer::HasCustomTrackColor(int track) const {
 }
 
 bool Visualizer::LoadBackgroundSource() {
-    if (!wicFactory_ || backgroundPath_.empty()) return false;
+    if (!wicFactory_ || backgroundImagePath_.empty()) return false;
 
     ComPtr<IWICBitmapDecoder> decoder;
     HRESULT hr = wicFactory_->CreateDecoderFromFilename(
-        backgroundPath_.c_str(), nullptr, GENERIC_READ,
+        backgroundImagePath_.c_str(), nullptr, GENERIC_READ,
         WICDecodeMetadataCacheOnLoad, decoder.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return false;
 
@@ -753,8 +750,8 @@ bool Visualizer::LoadBackgroundSource() {
 bool Visualizer::LoadBackgroundImage(const std::wstring& path) {
     if (path.empty() || !wicFactory_) return false;
 
-    // Load to temporary WIC/D2D resources first. If the file is invalid, keep
-    // the currently active background instead of clearing it prematurely.
+    // Decode the replacement completely before committing it. The currently
+    // loaded video layer is deliberately left untouched so the two can stack.
     ComPtr<IWICBitmapDecoder> decoder;
     HRESULT hr = wicFactory_->CreateDecoderFromFilename(
         path.c_str(), nullptr, GENERIC_READ,
@@ -782,15 +779,11 @@ bool Visualizer::LoadBackgroundImage(const std::wstring& path) {
         if (FAILED(hr)) return false;
     }
 
-    // Stop and join the old video's decoder before committing the new image.
-    // This also clears all cached video-frame state so it cannot leak into a
-    // later video selection.
-    ClearBackgroundVideoState();
-    backgroundPath_ = path;
+    backgroundImagePath_ = path;
     backgroundSource_ = converter;
-    backgroundBitmap_ = newBitmap;
-    backgroundOpacity_ = kDefaultBackgroundOpacity;
-    videoOffsetMilliseconds_ = 0;
+    backgroundImageBitmap_ = newBitmap;
+    // Loading or replacing a file must not overwrite the user's opacity setting.
+    // Defaults are applied only when the visualizer is initialized or explicitly reset.
     return true;
 }
 
@@ -821,55 +814,57 @@ bool Visualizer::LoadBackgroundVideo(const std::wstring& path, std::wstring& err
         return false;
     }
 
-    // Commit only after the new video and its first frame are ready. The
-    // previous image/video stays intact if opening or decoding failed.
+    // Replace only the video layer after its decoder and first frame are ready.
     ClearBackgroundVideoState();
-    backgroundSource_.Reset();
     backgroundVideo_ = std::move(decoder);
     backgroundVideoPixels_ = std::move(pixels);
     backgroundVideoWidth_ = videoWidth;
     backgroundVideoHeight_ = videoHeight;
     backgroundVideoFrameVersion_ = frameVersion;
     backgroundBitmapFrameVersion_ = frameVersion;
-    backgroundIsVideo_ = true;
-    backgroundPath_ = path;
-    backgroundBitmap_ = newBitmap;
-    backgroundOpacity_ = kDefaultBackgroundOpacity;
-    videoOffsetMilliseconds_ = 0;
+    backgroundVideoPath_ = path;
+    backgroundVideoBitmap_ = newBitmap;
+    // Keep the previously selected video opacity and sync offset when replacing
+    // the video file. ResetBackgroundImage() is the explicit settings reset path.
     return true;
 }
 
-void Visualizer::ResetBackgroundImage() {
-    // Revert to DrawBackground's built-in dark default background.
-    backgroundBitmap_.Reset();
+void Visualizer::UnloadBackgroundFilesPreserveSettings() {
+    // Remove the loaded files only. Keep the user's opacity and video-sync
+    // values intact when no image or video is currently loaded.
+    backgroundImageBitmap_.Reset();
     backgroundSource_.Reset();
+    backgroundImagePath_.clear();
     ClearBackgroundVideoState();
-    backgroundPath_.clear();
-    backgroundOpacity_ = kDefaultBackgroundOpacity;
+}
+
+void Visualizer::ResetBackgroundImage() {
+    // Revert to DrawBackground's built-in dark default background and remove
+    // both independently loaded layers, resetting their settings as before.
+    UnloadBackgroundFilesPreserveSettings();
+    backgroundImageOpacity_ = kDefaultBackgroundOpacity;
+    backgroundVideoOpacity_ = kDefaultBackgroundOpacity;
     videoOffsetMilliseconds_ = 0;
 }
 
 void Visualizer::ClearBackgroundVideoState() {
     // Resetting the unique_ptr stops the decoder worker and joins its thread.
-    // Clear every CPU-side cache/version as well; otherwise switching back to
-    // a video or recreating Direct2D resources could mistake an old frame for
-    // one from the newly selected file.
+    // Keep the image layer intact; only the video layer is cleared here.
     backgroundVideo_.reset();
     backgroundVideoPixels_.clear();
     backgroundVideoWidth_ = 0;
     backgroundVideoHeight_ = 0;
     backgroundVideoFrameVersion_ = 0;
     backgroundBitmapFrameVersion_ = 0;
-    backgroundIsVideo_ = false;
+    backgroundVideoBitmap_.Reset();
+    backgroundVideoPath_.clear();
     interactiveSeeking_ = false;
 }
 
 bool Visualizer::CreateBackgroundBitmap() {
     if (!target_ || !backgroundSource_) return false;
-    backgroundBitmap_.Reset();
-    backgroundBitmapFrameVersion_ = 0;
     return SUCCEEDED(target_->CreateBitmapFromWicBitmap(
-        backgroundSource_.Get(), nullptr, backgroundBitmap_.ReleaseAndGetAddressOf()));
+        backgroundSource_.Get(), nullptr, backgroundImageBitmap_.ReleaseAndGetAddressOf()));
 }
 
 bool Visualizer::CreateBackgroundVideoBitmap(
@@ -894,7 +889,7 @@ double Visualizer::BackgroundVideoTime(double songTime) const {
 
 bool Visualizer::UpdateBackgroundVideoFrame(double seconds, bool waitForFrame,
                                             std::wstring& error) {
-    if (!backgroundIsVideo_ || !backgroundVideo_) return true;
+    if (backgroundVideoPath_.empty() || !backgroundVideo_) return true;
 
     bool changed = false;
     if (!backgroundVideo_->GetFrameAtTime(
@@ -914,14 +909,14 @@ bool Visualizer::UpdateBackgroundVideoFrame(double seconds, bool waitForFrame,
             error = L"Direct2D could not update the video background bitmap.";
             return false;
         }
-        backgroundBitmap_ = newBitmap;
+        backgroundVideoBitmap_ = newBitmap;
         backgroundBitmapFrameVersion_ = backgroundVideoFrameVersion_;
     }
     return true;
 }
 
 void Visualizer::SetBackgroundOpacity(float opacity) {
-    backgroundOpacity_ = Clamp01(opacity);
+    SetBackgroundImageOpacity(opacity);
 }
 
 bool Visualizer::IsBlackKey(int note) const {
@@ -994,20 +989,18 @@ ID2D1RadialGradientBrush* Visualizer::SmokeBrushForTrack(int track) const {
     return smokeBrushes_[TrackBrushIndex(track)].Get();
 }
 
-ID2D1LinearGradientBrush* Visualizer::BeamBrushForTrack(int track) const {
-    return beamBrushes_[TrackBrushIndex(track)].Get();
-}
-
-ID2D1LinearGradientBrush* Visualizer::ActiveBlackBrushForTrack(int track) const {
-    return activeBlackBrushes_[TrackBrushIndex(track)].Get();
-}
-
 void Visualizer::DrawBackground(float width, float height) {
     target_->Clear(D2D1::ColorF(0.005f, 0.008f, 0.014f));
-    if (backgroundBitmap_ && backgroundOpacity_ > 0.0f) {
-        target_->DrawBitmap(
-            backgroundBitmap_.Get(), D2D1::RectF(0.0f, 0.0f, width, height),
-            backgroundOpacity_, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    const auto destination = D2D1::RectF(0.0f, 0.0f, width, height);
+    // The image is the base layer. The video is drawn above it, allowing both
+    // opacities to be adjusted independently and the image to show through.
+    if (backgroundImageBitmap_ && backgroundImageOpacity_ > 0.0f) {
+        target_->DrawBitmap(backgroundImageBitmap_.Get(), destination,
+            backgroundImageOpacity_, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    }
+    if (backgroundVideoBitmap_ && backgroundVideoOpacity_ > 0.0f) {
+        target_->DrawBitmap(backgroundVideoBitmap_.Get(), destination,
+            backgroundVideoOpacity_, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
 }
 
@@ -1100,14 +1093,22 @@ void Visualizer::DrawNotes(float width, float height) {
         }
 
         if (IsEffectEnabled(EffectNoteGlow)) {
-            // Make the glow deliberately strong and distribute it around the entire
-            // note rectangle.  The shell layers are opaque enough to remain clearly
-            // visible even on bright note fills and on long sustained notes.
-            const float intensity = 0.92f + 0.08f * velocity01;
+            // Stronger, broader bloom: the maximum setting is deliberately more
+            // intense and closer to white, while the note body keeps its track color.
+            // The non-linear response makes the upper part of the slider useful.
+            const float sliderStrength = std::pow(noteGlowIntensity_, 0.78f);
+            const float intensity = (0.92f + 0.08f * velocity01) * sliderStrength;
             const float radius = std::min(5.0f, w * 0.16f);
             ID2D1SolidColorBrush* glow = GlowBrushForTrack(n.track);
-            const float pads[] = {16.0f, 12.0f, 9.0f, 6.0f, 3.0f};
-            const float opacities[] = {0.075f, 0.095f, 0.13f, 0.18f, 0.25f};
+            const D2D1::ColorF originalGlowColor = GlowColorForTrack(n.track);
+            constexpr float kWhiteBlend = 0.62f;
+            glow->SetColor(D2D1::ColorF(
+                Lerp(originalGlowColor.r, 1.0f, kWhiteBlend),
+                Lerp(originalGlowColor.g, 1.0f, kWhiteBlend),
+                Lerp(originalGlowColor.b, 1.0f, kWhiteBlend), 1.0f));
+
+            const float pads[] = {22.0f, 16.0f, 11.0f, 7.0f, 3.0f};
+            const float opacities[] = {0.12f, 0.19f, 0.30f, 0.44f, 0.62f};
             for (int i = 0; i < 5; ++i) {
                 const float pad = pads[i];
                 glow->SetOpacity(opacities[i] * intensity);
@@ -1117,12 +1118,21 @@ void Visualizer::DrawNotes(float width, float height) {
                         radius + pad * 0.70f, radius + pad * 0.70f),
                     glow);
             }
-            glow->SetOpacity(0.46f * intensity);
+            glow->SetOpacity(0.68f * intensity);
             target_->DrawRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(x0 - 2.0f, top - 2.0f, x0 + w + 2.0f, bottom + 2.0f),
                     radius + 1.2f, radius + 1.2f),
                 glow, 2.0f);
+            white_->SetOpacity(0.24f * intensity);
+            target_->DrawRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(x0 - 1.0f, top - 1.0f, x0 + w + 1.0f, bottom + 1.0f),
+                    radius + 0.6f, radius + 0.6f),
+                white_.Get(), 1.0f);
+            white_->SetOpacity(1.0f);
+            glow->SetColor(originalGlowColor);
+            glow->SetOpacity(1.0f);
         }
 
         brush->SetOpacity(velocityOpacity * (IsEffectEnabled(EffectSmokeWindow) ? 0.24f : 1.0f));
@@ -1196,7 +1206,10 @@ void Visualizer::SpawnEffect(const MidiNote& note, int ordinal) {
         hitWaves_[slot].x = centerX;
         hitWaves_[slot].age = 0.0f;
         hitWaves_[slot].maxLife = 2.0f;
-        hitWaves_[slot].amplitude = 0.8f + static_cast<float>(note.velocity) * 0.0116667f;
+        // The user-adjustable multiplier is also copied to the offline renderer,
+        // so previews and exported videos use the same amplitude.
+        hitWaves_[slot].amplitude =
+            (0.8f + static_cast<float>(note.velocity) * 0.0116667f) * waveLineAmplitude_;
     }
 
     if (IsEffectEnabled(EffectImpactPolygons)) {
@@ -1230,10 +1243,10 @@ void Visualizer::SpawnEffect(const MidiNote& note, int ordinal) {
         r.diamond = true;
     }
 
-    if (IsEffectEnabled(EffectSpark)) {
-        for (int i = 0; i < kCinemaParticleCount && particleCount_ < kMaxParticles; ++i) {
+    if (IsEffectEnabled(EffectWaterDroplets)) {
+        for (int i = 0; i < kWaterDropletsPerHit && particleCount_ < kMaxParticles; ++i) {
             Particle& p = particles_[particleCount_++];
-            const float scale = 0.85f + Random01(seed) * 0.45f;
+            const float scale = 0.85f + Random01(seed) * 0.25f;
             const float xRandom = 0.20f + Random01(seed) * 0.60f;
             const float angle = (-3.14159265358979323846f * 0.95f) +
                 Random01(seed) * (3.14159265358979323846f * 0.90f);
@@ -1244,14 +1257,14 @@ void Visualizer::SpawnEffect(const MidiNote& note, int ordinal) {
             p.vy = std::sin(angle) * speed;
             p.life = 0.28f + Random01(seed) * 0.46f;
             p.maxLife = p.life;
-            p.size = (1.2f + Random01(seed) * 3.2f) * scale;
+            p.size = (0.9f + Random01(seed) * 2.5f) * scale;
             p.maxSize = p.size;
             p.gravity = 520.0f * scale;
             p.track = note.track;
             p.phase = 0.0f;
             p.windPhase = 0.0f;
-            p.spark = true;
-            p.whiteSpark = ((i % 4) == 0);
+            p.waterDroplet = true;
+            p.dropletWhiteMix = 0.18f + Random01(seed) * 0.55f;
             p.crossSpark = false;
         }
     }
@@ -1313,8 +1326,8 @@ void Visualizer::SpawnSmokeBurst(const MidiNote& note, std::int64_t emissionInde
         p.track = note.track;
         p.phase = 0.0f;
         p.windPhase = Random01(seed) * 6.2831853071795864769f;
-        p.spark = false;
-        p.whiteSpark = false;
+        p.waterDroplet = false;
+        p.dropletWhiteMix = 0.0f;
         p.crossSpark = false;
     }
 }
@@ -1354,8 +1367,8 @@ void Visualizer::SpawnCrossBurst(const MidiNote& note, std::int64_t emissionInde
         p.track = note.track;
         p.phase = 0.0f;
         p.windPhase = Random01(seed) * 6.2831853071795864769f;
-        p.spark = false;
-        p.whiteSpark = false;
+        p.waterDroplet = false;
+        p.dropletWhiteMix = 0.0f;
         p.crossSpark = true;
     }
 }
@@ -1443,7 +1456,7 @@ void Visualizer::UpdateEffects() {
         }
 
         const float d = static_cast<float>(dt);
-        if (p.spark) {
+        if (p.waterDroplet) {
             p.vx *= std::pow(0.985f, d * 60.0f);
             p.vy *= std::pow(0.985f, d * 60.0f);
             p.x += p.vx * d;
@@ -1513,7 +1526,7 @@ void Visualizer::DrawEffects(float width, float height) {
     const bool drawUpperEffects =
         IsEffectEnabled(EffectSmokeGlow) ||
         IsEffectEnabled(EffectCrossSpark) ||
-        IsEffectEnabled(EffectSpark);
+        IsEffectEnabled(EffectWaterDroplets);
 
     if (drawUpperEffects) {
         target_->PushAxisAlignedClip(
@@ -1523,7 +1536,7 @@ void Visualizer::DrawEffects(float width, float height) {
         if (IsEffectEnabled(EffectSmokeGlow)) {
             for (int i = 0; i < particleCount_; ++i) {
                 const Particle& p = particles_[i];
-                if (p.spark || p.crossSpark) continue;
+                if (p.waterDroplet || p.crossSpark) continue;
                 const float progress = 1.0f - (p.life / p.maxLife);
                 const float currentSize = p.size +
                     (p.maxSize - p.size) * std::sin(
@@ -1569,31 +1582,28 @@ void Visualizer::DrawEffects(float width, float height) {
             }
         }
 
-        if (IsEffectEnabled(EffectSpark)) {
+        if (IsEffectEnabled(EffectWaterDroplets)) {
             for (int i = 0; i < particleCount_; ++i) {
                 const Particle& p = particles_[i];
-                if (!p.spark || p.life <= 0.0f) continue;
+                if (!p.waterDroplet || p.life <= 0.0f) continue;
                 const float a = p.life / p.maxLife;
-                if (p.whiteSpark) {
-                    white_->SetOpacity(a * 0.22f);
-                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
-                                      p.size * 2.2f, p.size * 2.2f), white_.Get());
-                    white_->SetOpacity(a * 0.98f);
-                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
-                                      p.size, p.size), white_.Get());
-                } else {
-                    ID2D1SolidColorBrush* glow = GlowBrushForTrack(p.track);
-                    glow->SetOpacity(a * 0.22f);
-                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
-                                      p.size * 2.2f, p.size * 2.2f), glow);
-                    glow->SetOpacity(a * 0.98f);
-                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
-                                      p.size, p.size), glow);
-                }
-                white_->SetOpacity(a * 0.88f);
+                const auto noteColor = NoteColorForTrack(p.track);
+                const float mix = Clamp01(p.dropletWhiteMix);
+                const D2D1::ColorF dropletColor(
+                    Lerp(noteColor.r, 1.0f, mix),
+                    Lerp(noteColor.g, 1.0f, mix),
+                    Lerp(noteColor.b, 1.0f, mix), 1.0f);
+                ID2D1SolidColorBrush* glow = GlowBrushForTrack(p.track);
+                glow->SetColor(dropletColor);
+                glow->SetOpacity(a * 0.30f);
                 target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
-                                  std::max(0.8f, p.size * 0.30f),
-                                  std::max(0.8f, p.size * 0.30f)), white_.Get());
+                                  p.size * 2.2f, p.size * 2.2f), glow);
+                glow->SetOpacity(a * 0.96f);
+                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(p.x, p.y),
+                                  p.size, p.size), glow);
+                // Restore the shared per-track brush so other effects keep the
+                // exact palette color regardless of the droplet draw order.
+                glow->SetColor(GlowColorForTrack(p.track));
             }
         }
 
@@ -1705,18 +1715,14 @@ void Visualizer::DrawEffects(float width, float height) {
 
 void Visualizer::DrawWaveLine(float width) {
     if (!waveLineBrush_ || width <= 1.0f) return;
-    const bool noteGlowEnabled = IsEffectEnabled(EffectNoteGlow);
+
+    // Wave Line's bloom is controlled independently from Note Glow. The color
+    // and sharp core remain visible when the bloom is disabled or set to zero.
+    // 100% of the previous maximum intensity; the checkbox is the only control.
+    const float glowStrength = waveLineGlowEnabled_ ? 1.0f : 0.0f;
     const D2D1::ColorF configuredColor = waveLineColor_;
-    if (noteGlowEnabled) {
-        // Keep the selected hue but move it toward white and increase the halo
-        // while Note Glow is enabled, so the hit wave shares the same visual cue.
-        waveLineBrush_->SetColor(D2D1::ColorF(
-            Lerp(configuredColor.r, 1.0f, 0.48f),
-            Lerp(configuredColor.g, 1.0f, 0.48f),
-            Lerp(configuredColor.b, 1.0f, 0.48f), 1.0f));
-    } else {
-        waveLineBrush_->SetColor(configuredColor);
-    }
+    waveLineBrush_->SetColor(configuredColor);
+
     const int segments = std::clamp(static_cast<int>(width / 4.0f), 48, 1800);
     constexpr float kBaseline = -1.5f;
     constexpr float kWaveSpeed = 260.0f;
@@ -1750,37 +1756,29 @@ void Visualizer::DrawWaveLine(float width) {
         }
 
         if (afterimage) {
-            // Draw older wave positions beneath the current line. Only segments
-            // that still carry a displacement are drawn, avoiding a second full
-            // horizontal baseline while leaving a subtle aqua trail behind the fronts.
-            const float baseline = hitY_ + kBaseline;
-            const float opacity[] = {
-                (noteGlowEnabled ? 0.18f : 0.12f) * strength,
-                (noteGlowEnabled ? 0.36f : 0.28f) * strength};
-            const float thickness[] = {
-                noteGlowEnabled ? 7.0f : 5.5f,
-                noteGlowEnabled ? 2.8f : 2.2f};
-            for (int pass = 0; pass < 2; ++pass) {
-                waveLineBrush_->SetOpacity(opacity[pass]);
-                for (int i = 1; i <= segments; ++i) {
-                    const auto& a = points[static_cast<std::size_t>(i - 1)];
-                    const auto& b = points[static_cast<std::size_t>(i)];
-                    if (std::abs(a.y - baseline) < 0.035f && std::abs(b.y - baseline) < 0.035f) continue;
-                    target_->DrawLine(a, b, waveLineBrush_.Get(), thickness[pass]);
+            // The soft trail is part of the independent Wave Line glow option.
+            const float opacity[] = {0.12f * glowStrength, 0.28f * glowStrength};
+            constexpr float thickness[] = {5.5f, 2.2f};
+            if (glowStrength > 0.0f) {
+                const float baseline = hitY_ + kBaseline;
+                for (int pass = 0; pass < 2; ++pass) {
+                    waveLineBrush_->SetOpacity(opacity[pass] * strength);
+                    for (int i = 1; i <= segments; ++i) {
+                        const auto& a = points[static_cast<std::size_t>(i - 1)];
+                        const auto& b = points[static_cast<std::size_t>(i)];
+                        if (std::abs(a.y - baseline) < 0.035f &&
+                            std::abs(b.y - baseline) < 0.035f) continue;
+                        target_->DrawLine(a, b, waveLineBrush_.Get(), thickness[pass]);
+                    }
                 }
             }
         } else {
-            // Broad halo, colored core, and fine highlight for the live wave.
-            // Note Glow increases each layer's opacity and width for a stronger bloom.
-            const float opacity[] = {
-                noteGlowEnabled ? 0.28f : 0.16f,
-                noteGlowEnabled ? 0.60f : 0.44f,
-                noteGlowEnabled ? 1.00f : 0.88f};
-            const float thickness[] = {
-                noteGlowEnabled ? 14.0f : 10.0f,
-                noteGlowEnabled ? 5.2f : 4.0f,
-                noteGlowEnabled ? 1.65f : 1.25f};
+            // The broad outer pass is the glow; the colored core and fine
+            // highlight stay crisp and visible regardless of the glow setting.
+            const float opacity[] = {0.16f * glowStrength, 0.44f, 0.88f};
+            constexpr float thickness[] = {10.0f, 4.0f, 1.25f};
             for (int pass = 0; pass < 3; ++pass) {
+                if (pass == 0 && glowStrength <= 0.0f) continue;
                 waveLineBrush_->SetOpacity(opacity[pass]);
                 for (int i = 1; i <= segments; ++i) {
                     target_->DrawLine(points[static_cast<std::size_t>(i - 1)],
@@ -1903,21 +1901,21 @@ void Visualizer::DrawKeyboard(float width, float height) {
         }
     }
 
-    // IMPORTANT: the active white-key fill is the final fill for white keys.
-    // No static bevel/highlight is drawn after it, preventing the small white/gray
-    // patch above an illuminated key that existed in earlier revisions.
+    // Active white keys are illuminated uniformly from top to bottom. A solid
+    // track-color fill keeps the lower part of the key visible instead of fading
+    // to transparency, which was particularly hard to see on black keys.
     for (int i = 0; i < activeNoteCount_; ++i) {
         const int note = activeNoteList_[i];
         if (IsBlackKey(note)) continue;
         const int track = activeTracks_[note];
         const float x = KeyX(note) + 1.0f;
         const float w = std::max(2.0f, KeyW(note) - 2.0f);
-        ID2D1LinearGradientBrush* gradient = BeamBrushForTrack(track);
-        gradient->SetStartPoint(D2D1::Point2F(x, hitY_));
-        gradient->SetEndPoint(D2D1::Point2F(x, hitY_ + keyboardHeight_));
-        gradient->SetOpacity(VelocityOpacity(activeVelocities_[note]) * 0.98f);
+        auto* activeBrush = NoteBrushForTrack(track);
+        const float velocity = Velocity01(activeVelocities_[note]);
+        activeBrush->SetOpacity(0.52f + 0.22f * velocity);
         target_->FillRectangle(
-            D2D1::RectF(x, hitY_, x + w, hitY_ + keyboardHeight_), gradient);
+            D2D1::RectF(x, hitY_, x + w, hitY_ + keyboardHeight_), activeBrush);
+        activeBrush->SetOpacity(1.0f);
     }
 
     for (int n = kFirstKey; n <= kLastKey; ++n) {
@@ -1955,15 +1953,15 @@ void Visualizer::DrawKeyboard(float width, float height) {
                 std::min(2.0f, r), std::min(2.0f, r)), white_.Get());
 
         const bool active = track >= 0 &&
-            static_cast<size_t>(track) < activeBlackBrushes_.size() &&
-            activeBlackBrushes_[TrackBrushIndex(track)];
+            static_cast<std::size_t>(track) < noteBrushes_.size();
         if (active) {
+            // Use a solid color over the complete black-key surface so its
+            // illumination remains legible instead of fading into the dark key.
             const float velocity01 = Velocity01(activeVelocities_[n]);
-            ID2D1LinearGradientBrush* activeGradient = ActiveBlackBrushForTrack(track);
-            activeGradient->SetStartPoint(D2D1::Point2F(x, hitY_));
-            activeGradient->SetEndPoint(D2D1::Point2F(x, hitY_ + h));
-            activeGradient->SetOpacity(VelocityOpacity(activeVelocities_[n]) * 0.98f);
-            target_->FillRoundedRectangle(keyRect, activeGradient);
+            auto* activeBrush = NoteBrushForTrack(track);
+            activeBrush->SetOpacity(0.70f + 0.24f * velocity01);
+            target_->FillRoundedRectangle(keyRect, activeBrush);
+            activeBrush->SetOpacity(1.0f);
 
             glowBrushes_[TrackBrushIndex(track)]->SetOpacity(0.20f + 0.20f * velocity01);
             target_->DrawRoundedRectangle(
@@ -1974,6 +1972,8 @@ void Visualizer::DrawKeyboard(float width, float height) {
                 glowBrushes_[TrackBrushIndex(track)].Get(), 1.0f);
         }
     }
+
+    DrawKeybedGlow();
 
     if (c4LabelFormat_) {
         // C4 is MIDI note 60.  Use the exact same key-position calculation as
@@ -1995,6 +1995,52 @@ void Visualizer::DrawKeyboard(float width, float height) {
     black_->SetOpacity(1.0f);
 }
 
+
+void Visualizer::DrawKeybedGlow() {
+    if (!target_ || !IsEffectEnabled(EffectKeybedGlow) || activeNoteCount_ <= 0 ||
+        keybedGlowBrushes_.empty()) {
+        return;
+    }
+
+    // A soft, pure-white radial glow is centered exactly on the note/key
+    // contact point. Use the same radius in X and Y and do not draw a seam
+    // line or clip the glow: it must spread evenly in all four directions.
+    // Since this iterates only active notes, the glow remains visible while
+    // the note is held and disappears as soon as the note turns off.
+    for (int i = 0; i < activeNoteCount_; ++i) {
+        const int note = activeNoteList_[i];
+        if (note < kFirstKey || note > kLastKey) continue;
+
+        const int track = activeTracks_[note];
+        const std::size_t brushIndex = TrackBrushIndex(track);
+        if (brushIndex >= keybedGlowBrushes_.size() || !keybedGlowBrushes_[brushIndex]) continue;
+
+        // Center the bloom horizontally within the rendered note/key width.
+        const float inset = IsBlackKey(note) ? 2.0f : 1.7f;
+        const float left = KeyX(note) + inset;
+        const float right = KeyX(note) + KeyW(note) - inset;
+        if (right <= left) continue;
+
+        const float centerX = (left + right) * 0.5f;
+        const float noteWidth = right - left;
+        const float radius = std::clamp(noteWidth * 1.55f, 14.0f, 32.0f);
+        const D2D1_POINT_2F contact = D2D1::Point2F(centerX, hitY_);
+
+        auto* glow = keybedGlowBrushes_[brushIndex].Get();
+        glow->SetCenter(contact);
+        glow->SetGradientOriginOffset(D2D1::Point2F(0.0f, 0.0f));
+        glow->SetRadiusX(radius);
+        glow->SetRadiusY(radius);
+
+        // A slightly stronger neutral-white bloom, with a bright center and
+        // smooth falloff in all directions. No line is drawn at the boundary.
+        const float velocity = Velocity01(activeVelocities_[note]);
+        glow->SetOpacity(0.88f + velocity * 0.12f);
+        target_->FillEllipse(D2D1::Ellipse(contact, radius, radius), glow);
+        glow->SetOpacity(1.0f);
+    }
+}
+
 bool Visualizer::RenderFrame(bool waitForVideoFrame, std::wstring& error) {
     if (!target_) {
         error = L"The renderer is not initialized.";
@@ -2002,7 +2048,7 @@ bool Visualizer::RenderFrame(bool waitForVideoFrame, std::wstring& error) {
     }
 
     bool backgroundOk = true;
-    if (backgroundIsVideo_ &&
+    if (HasBackgroundVideo() &&
         !UpdateBackgroundVideoFrame(
             BackgroundVideoTime(currentTime_), waitForVideoFrame, error)) {
         // Keep drawing with the last decoded background frame in the live

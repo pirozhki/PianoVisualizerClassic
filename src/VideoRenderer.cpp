@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -91,8 +93,30 @@ bool LaunchFfmpeg(const VideoRenderOptions& options,
         + L" -i pipe:0";
 
     if (options.includeAudio) {
-        args += L" -i " + QuoteArg(options.temporaryWavPath);
-        args += L" -map 0:v:0 -map 1:a:0";
+        if (!options.audioInputPath.empty()) {
+            // Use the loaded WAV and align it to MIDI time. Positive offsets add
+            // leading silence; negative offsets trim the beginning of the file.
+            args += L" -i " + QuoteArg(options.audioInputPath);
+            std::wostringstream durationText;
+            durationText << std::fixed << std::setprecision(3)
+                         << (options.fps > 0.0 ? static_cast<double>(frameCount) / options.fps : 0.0);
+            const int offset = std::clamp(options.audioOffsetMilliseconds, -10000, 10000);
+            std::wstring filter = L"[1:a]";
+            if (offset > 0) {
+                filter += L"adelay=" + std::to_wstring(offset) + L":all=1,";
+            } else if (offset < 0) {
+                std::wostringstream trimStart;
+                trimStart << std::fixed << std::setprecision(3) << (-offset / 1000.0);
+                filter += L"atrim=start=" + trimStart.str() + L",asetpts=PTS-STARTPTS,";
+            }
+            filter += L"volume=" + std::to_wstring(std::clamp(options.audioVolume, 0.0f, 1.0f))
+                + L",apad,atrim=duration=" + durationText.str() + L"[audioout]";
+            args += L" -filter_complex " + QuoteArg(filter);
+            args += L" -map 0:v:0 -map " + QuoteArg(L"[audioout]");
+        } else {
+            args += L" -i " + QuoteArg(options.temporaryWavPath);
+            args += L" -map 0:v:0 -map 1:a:0";
+        }
     } else {
         args += L" -map 0:v:0 -an";
     }
@@ -101,7 +125,12 @@ bool LaunchFfmpeg(const VideoRenderOptions& options,
         + L" -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p"
         + L" -movflags +faststart";
 
-    if (options.includeAudio) args += L" -c:a aac -b:a 192k -shortest";
+    if (options.includeAudio) {
+        args += L" -c:a aac -b:a 192k";
+        // Keep the established synthesized-audio behavior. External WAV audio is
+        // explicitly padded/truncated to the full frame-count duration by filter.
+        if (options.audioInputPath.empty()) args += L" -shortest";
+    }
     args += L" " + QuoteArg(options.outputPath);
 
     std::vector<wchar_t> mutableCommand(args.begin(), args.end());
@@ -188,7 +217,7 @@ bool VideoRenderer::RenderMp4(const Visualizer& visualizer,
         error = L"ffmpeg.exe could not be found.";
         return false;
     }
-    if (options.includeAudio && !synth) {
+    if (options.includeAudio && options.audioInputPath.empty() && !synth) {
         error = L"The internal audio synthesizer is unavailable.";
         return false;
     }
@@ -197,7 +226,8 @@ bool VideoRenderer::RenderMp4(const Visualizer& visualizer,
         return false;
     }
 
-    const double renderDuration = song.duration + kTailSeconds;
+    const double tailSeconds = std::clamp(options.tailSeconds, 0.0, 60.0);
+    const double renderDuration = song.duration + tailSeconds;
     const std::uint64_t frameCount = static_cast<std::uint64_t>(
         std::ceil(renderDuration * options.fps));
     if (frameCount == 0 || frameCount > 10000000ULL) {
@@ -229,6 +259,7 @@ bool VideoRenderer::RenderMp4(const Visualizer& visualizer,
     const float normalizedFallSpeed =
         options.fallSpeed * (renderFallDistance / liveFallDistance);
     renderVisualizer.SetFallSpeed(normalizedFallSpeed);
+    renderVisualizer.SetTailDurationSeconds(tailSeconds);
 
     PROCESS_INFORMATION pi{};
     HANDLE ffmpegPipe = nullptr;
